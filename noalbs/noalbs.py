@@ -110,7 +110,7 @@ class Noalbs:
         else:
             vcodec = ["-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency"]
 
-        tee_target = f"[f=flv:onfail=ignore]rtmp://127.0.0.1:19352/{self.app_name}/cloud_brb_loop|[f=flv:onfail=ignore]rtmp://127.0.0.1:19352/vertical/cloud_brb_loop"
+        tee_target = f"[f=flv:onfail=ignore]rtmp://127.0.0.1:1935/{self.app_name}/cloud_brb_loop|[f=flv:onfail=ignore]rtmp://127.0.0.1:1935/vertical/cloud_brb_loop"
 
         cmd = [
             "ffmpeg", "-hide_banner", "-loglevel", "warning",

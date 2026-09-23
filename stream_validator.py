@@ -58,6 +58,10 @@ def is_ip_allowed(client_ip_str, accepted_ip_setting):
     if not accepted_ip_setting:
         return True
     try:
+        if ':' in client_ip_str and not client_ip_str.startswith('['):
+            parts = client_ip_str.split(':')
+            if len(parts) == 2:
+                client_ip_str = parts[0]
         client_ip = ipaddress.ip_address(client_ip_str)
         # Always permit loopback addresses (127.0.0.1)
         if client_ip.is_loopback:
@@ -159,14 +163,14 @@ def validate():
             if pusher_key not in active_pushers:
                 app.logger.info(f"Starting TikTok auto-pusher for horizontal stream...")
                 active_pushers[pusher_key] = subprocess.Popen(
-                    ['python3', '/app/tiktok_pusher.py', f"rtmp://127.0.0.1:19352/{app_name}/{stream_key_attempt}"]
+                    ['python3', '/app/tiktok_pusher.py', f"rtmp://127.0.0.1:1935/{app_name}/{stream_key_attempt}"]
                 )
         
         if app_name == 'vertical' and os.getenv('V_TIKTOK_URL') == "auto":
             if pusher_key not in active_pushers:
                 app.logger.info(f"Starting TikTok auto-pusher for vertical stream...")
                 active_pushers[pusher_key] = subprocess.Popen(
-                    ['python3', '/app/tiktok_pusher.py', f"rtmp://127.0.0.1:19352/{app_name}/{stream_key_attempt}"]
+                    ['python3', '/app/tiktok_pusher.py', f"rtmp://127.0.0.1:1935/{app_name}/{stream_key_attempt}"]
                 )
 
         return Response('OK', status=200)
