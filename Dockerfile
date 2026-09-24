@@ -64,7 +64,9 @@ COPY tiktok_search.py /app/tiktok_search.py
 COPY noalbs /app/noalbs
 
 # Config Stunnel
-RUN mkdir -p  /etc/stunnel/conf.d
+RUN mkdir -p /etc/stunnel/conf.d /var/run/stunnel4 /var/log/stunnel4 && \
+    chown -R stunnel4:stunnel4 /var/run/stunnel4 /var/log/stunnel4
+
 # Set up config file 
 COPY stunnel/stunnel.conf /etc/stunnel/stunnel.conf
 COPY stunnel/stunnel4 /etc/default/stunnel4
@@ -75,14 +77,23 @@ COPY stunnel/facebook.conf /etc/stunnel/conf.d/facebook.conf
 #Instagram Stunnel Port 19351
 COPY stunnel/instagram.conf /etc/stunnel/conf.d/instagram.conf
 
-#Tiktok Stunnel Port 19358
-COPY stunnel/tiktok.conf /etc/stunnel/conf.d/tiktok.conf
+#Twitch Stunnel Port 19353
+COPY stunnel/twitch.conf /etc/stunnel/conf.d/twitch.conf
+
+#X Stunnel Port 19354
+COPY stunnel/x.conf /etc/stunnel/conf.d/x.conf
+
+#YouTube Primary Stunnel Port 19355
+COPY stunnel/youtube.conf /etc/stunnel/conf.d/youtube.conf
 
 #Kick Stunnel Port 19356
 COPY stunnel/kick.conf /etc/stunnel/conf.d/kick.conf
 
-#X Stunnel Port 19354
-COPY stunnel/x.conf /etc/stunnel/conf.d/x.conf
+#YouTube Backup Stunnel Port 19357
+COPY stunnel/youtube-backup.conf /etc/stunnel/conf.d/youtube-backup.conf
+
+#Tiktok Stunnel Port 19358
+COPY stunnel/tiktok.conf /etc/stunnel/conf.d/tiktok.conf
 
 RUN apt-get update && apt-get upgrade -y && apt-get clean && rm -rf /var/lib/apt/lists/*
 

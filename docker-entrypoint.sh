@@ -8,6 +8,11 @@ ENV_OK=0
 MAX_WAIT_VALIDATOR_SECONDS=15 # Maximum seconds to wait for validator
 VALIDATOR_CHECK_INTERVAL_SECONDS=0.2 # Check every 200ms
 
+# Ensure SERVER_DOMAIN has a fallback to prevent Nginx syntax errors when domain is unconfigured
+if [ -z "$SERVER_DOMAIN" ]; then
+    SERVER_DOMAIN="localhost"
+fi
+
 # !!! Removed MASTER_STREAM_KEY check !!!
 # The container will now start without it, relying on destination keys for validation.
 
@@ -93,8 +98,10 @@ add_push() {
             sed -i "s|#${template_marker}| |g" $TMP_TEMPLATE
         else
             echo "${platform_name} activated."
-            # Correctly escape slashes in URLs for sed, use | as delimiter
-            local escaped_push="push ${push_url}${key_value};"
+            # Correctly escape backslashes, pipes, and ampersands for sed
+            local safe_push_url=$(printf '%s' "$push_url" | sed -e 's/\\/\\\\/g' -e 's/|/\\|/g' -e 's/&/\\&/g')
+            local safe_key_value=$(printf '%s' "$key_value" | sed -e 's/\\/\\\\/g' -e 's/|/\\|/g' -e 's/&/\\&/g')
+            local escaped_push="push ${safe_push_url}${safe_key_value};"
             sed -i "s|#${template_marker}|${escaped_push}|g" $TMP_TEMPLATE
             ENV_OK=1
        fi
@@ -128,19 +135,16 @@ add_push "V-X (Twitter)" "V_X_KEY"        "V_X_URL"         "v_x"
 add_push "V-RTMP1"      "V_RTMP1_KEY"    "V_RTMP1_URL"     "v_rtmp1"
 
 
+# Whitelist explicit template variables for envsubst to prevent clobbering internal Nginx variables
+SUBST_VARS='$SERVER_DOMAIN $CHUNK_SIZE $APP_NAME $FACEBOOK_URL $FACEBOOK_KEY $TWITCH_URL $TWITCH_KEY $YOUTUBE_URL $YOUTUBE_KEY $KICK_URL $KICK_KEY $X_URL $X_KEY'
+
 if [ $ENV_OK -eq 1 ]; then
     echo "Generating final Nginx configuration..."
-    # Use envsubst for any remaining ${VAR} placeholders (though we added most via sed now)
-    # Define the list of variables envsubst should consider
-    EXPORT_VARS=$(printf '${%s} ' $(env | cut -d= -f1))
-    envsubst "$EXPORT_VARS" < $TMP_TEMPLATE > $NGINX_CONF
+    envsubst "$SUBST_VARS" < $TMP_TEMPLATE > $NGINX_CONF
     rm $TMP_TEMPLATE # Clean up temp file
 else
     echo "Warning: No destination stream keys provided. Nginx will start, but no streams will be pushed, and no incoming streams will be accepted."
-    # Still generate config from template, it will just have no push directives
-    # Define the list of variables envsubst should consider even if no ENV_OK
-    EXPORT_VARS=$(printf '${%s} ' $(env | cut -d= -f1))
-    envsubst "$EXPORT_VARS" < $TMP_TEMPLATE > $NGINX_CONF
+    envsubst "$SUBST_VARS" < $TMP_TEMPLATE > $NGINX_CONF
     rm $TMP_TEMPLATE
 fi
 
@@ -152,7 +156,9 @@ if [ -n "${DEBUG}" ]; then
 fi
 
 echo "Starting Stunnel..."
-# Start stunnel in the background
+# Ensure runtime and log directories exist with correct permissions
+mkdir -p /var/run/stunnel4 /var/log/stunnel4
+chown -R stunnel4:stunnel4 /var/run/stunnel4 /var/log/stunnel4 2>/dev/null || true
 stunnel4 /etc/stunnel/stunnel.conf
 
 # --- SSL Initialization (Dummy Certificates) ---
@@ -171,7 +177,7 @@ if [ -n "$SERVER_DOMAIN" ]; then
 fi
 
 # --- Certbot Renewal Loop ---
-if [ -n "$SERVER_DOMAIN" ]; then
+if [ -n "$SERVER_DOMAIN" ] && [ "$SERVER_DOMAIN" != "localhost" ]; then
     mkdir -p /var/www/certbot
     echo "Starting Certbot renewal background loop..."
     (
