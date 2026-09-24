@@ -101,12 +101,12 @@ class TestNoalbsComprehensive(unittest.TestCase):
         self.assertIn("-c:v", cmd)
         self.assertIn("libx264", cmd)
         
-        # Verify optional audio map (-map 0:a?) and port 19352 target
+        # Verify optional audio map (-map 0:a?) and port 1935 target
         self.assertIn("-map", cmd)
         self.assertIn("0:a?", cmd)
         tee_target = cmd[-1]
-        self.assertIn("rtmp://127.0.0.1:19352/live/cloud_brb_loop", tee_target)
-        self.assertIn("rtmp://127.0.0.1:19352/vertical/cloud_brb_loop", tee_target)
+        self.assertIn("rtmp://127.0.0.1:1935/live/cloud_brb_loop", tee_target)
+        self.assertIn("rtmp://127.0.0.1:1935/vertical/cloud_brb_loop", tee_target)
 
     @patch("noalbs.noalbs.os.path.exists", return_value=True)
     @patch("subprocess.Popen")

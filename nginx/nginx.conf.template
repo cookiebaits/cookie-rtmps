@@ -23,12 +23,16 @@ stream {
         listen 1935;
         proxy_pass $backend_name;
         ssl_preread on;
+        proxy_protocol on;
     }
 }
 
 http {
     include       mime.types;
     default_type  application/octet-stream;
+
+    set_real_ip_from 127.0.0.1;
+    real_ip_header proxy_protocol;
 
     # Cloudflare Real IP (IPv4 only)
     set_real_ip_from 103.21.244.0/22;
@@ -76,7 +80,7 @@ http {
 
     # HTTPS Server (Internal Port 8443, Fused from 443)
     server {
-        listen 8443 ssl;
+        listen 8443 ssl proxy_protocol;
         server_name ${SERVER_DOMAIN};
 
         ssl_certificate /etc/letsencrypt/live/${SERVER_DOMAIN}/fullchain.pem;
@@ -117,7 +121,7 @@ http {
 
 rtmp {
     server {
-        listen 19352;
+        listen 19352 proxy_protocol;
         chunk_size ${CHUNK_SIZE};
 
         # Stability and Security Enhancements
