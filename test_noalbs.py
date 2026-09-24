@@ -90,6 +90,22 @@ class TestNoalbsComprehensive(unittest.TestCase):
     @patch("noalbs.noalbs.os.path.exists", return_value=True)
     @patch("subprocess.Popen")
     @patch("subprocess.run")
+    def test_custom_brb_video_path(self, mock_run, mock_popen, mock_exists):
+        custom_path = "/tmp/my_custom_brb.mp4"
+        os.environ["BRB_VIDEO_PATH"] = custom_path
+        noalbs = Noalbs()
+        self.assertEqual(noalbs.brb_video_path, custom_path)
+
+        noalbs.start_cloud_brb()
+        mock_popen.assert_called_once()
+        cmd = mock_popen.call_args[0][0]
+        self.assertIn("-stream_loop", cmd)
+        self.assertIn("-1", cmd)
+        self.assertIn(custom_path, cmd)
+
+    @patch("noalbs.noalbs.os.path.exists", return_value=True)
+    @patch("subprocess.Popen")
+    @patch("subprocess.run")
     def test_start_cloud_brb_libx264_command(self, mock_run, mock_popen, mock_exists):
         mock_run.return_value = MagicMock(stdout="libx264")
         noalbs = Noalbs()
