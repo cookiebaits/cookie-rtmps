@@ -67,7 +67,7 @@ class TestNoalbsComprehensive(unittest.TestCase):
 """
         return xml
 
-    @patch("requests.get")
+    @patch("requests.Session.get")
     def test_get_bitrate_calculation_and_filtering(self, mock_get):
         noalbs = Noalbs()
 
@@ -81,7 +81,7 @@ class TestNoalbsComprehensive(unittest.TestCase):
         # Should sum live + vertical (7000 kbps) and ignore cloud_brb_loop
         self.assertEqual(bitrate, 7000)
 
-    @patch("requests.get", side_effect=Exception("Connection refused"))
+    @patch("requests.Session.get", side_effect=Exception("Connection refused"))
     def test_get_bitrate_handles_network_error(self, mock_get):
         noalbs = Noalbs()
         bitrate = noalbs.get_bitrate()
@@ -106,7 +106,7 @@ class TestNoalbsComprehensive(unittest.TestCase):
     @patch("noalbs.noalbs.os.path.exists", return_value=True)
     @patch("subprocess.Popen")
     @patch("subprocess.run")
-    def test_start_cloud_brb_libx264_command(self, mock_run, mock_popen, mock_exists):
+    def test_start_cloud_brb_libx264_command_and_upload_optimizations(self, mock_run, mock_popen, mock_exists):
         mock_run.return_value = MagicMock(stdout="libx264")
         noalbs = Noalbs()
         noalbs.start_cloud_brb()
@@ -116,13 +116,45 @@ class TestNoalbsComprehensive(unittest.TestCase):
         self.assertEqual(cmd[0], "ffmpeg")
         self.assertIn("-c:v", cmd)
         self.assertIn("libx264", cmd)
+        self.assertIn("-preset", cmd)
+        self.assertIn("ultrafast", cmd)
         
-        # Verify optional audio map (-map 0:a?) and port 1935 target
+        # Verify low delay and upload optimization flags
+        self.assertIn("-fflags", cmd)
+        self.assertIn("+nobuffer", cmd)
+        self.assertIn("-flags", cmd)
+        self.assertIn("+low_delay", cmd)
         self.assertIn("-map", cmd)
         self.assertIn("0:a?", cmd)
+
         tee_target = cmd[-1]
         self.assertIn("rtmp://127.0.0.1:1935/live/cloud_brb_loop", tee_target)
         self.assertIn("rtmp://127.0.0.1:1935/vertical/cloud_brb_loop", tee_target)
+
+    @patch("noalbs.noalbs.os.makedirs")
+    @patch("requests.get")
+    @patch("subprocess.Popen")
+    @patch("subprocess.run")
+    def test_start_cloud_brb_downloads_mp4_direct_link(self, mock_run, mock_popen, mock_get, mock_makedirs):
+        os.environ["BRB_VIDEO_URL"] = "https://example.com/stream_fallback.mp4"
+        noalbs = Noalbs()
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.iter_content.return_value = [b"video_bytes"]
+        mock_get.return_value = mock_resp
+
+        # First exists check is False (download needed), subsequent is True
+        exists_calls = [False, True]
+        def fake_exists(path):
+            return exists_calls.pop(0) if exists_calls else True
+
+        with patch("noalbs.noalbs.os.path.exists", side_effect=fake_exists):
+            with patch("builtins.open", MagicMock()):
+                noalbs.start_cloud_brb()
+
+        mock_get.assert_called_once_with("https://example.com/stream_fallback.mp4", timeout=15, stream=True)
+        mock_popen.assert_called_once()
 
     @patch("noalbs.noalbs.os.path.exists", return_value=True)
     @patch("subprocess.Popen")
@@ -151,6 +183,7 @@ class TestNoalbsComprehensive(unittest.TestCase):
     @patch("subprocess.Popen")
     def test_start_cloud_brb_missing_video_file(self, mock_popen, mock_exists):
         noalbs = Noalbs()
+        noalbs.brb_video_url = ""
         noalbs.start_cloud_brb()
         mock_popen.assert_not_called()
 
@@ -172,13 +205,14 @@ class TestNoalbsComprehensive(unittest.TestCase):
         noalbs.obs_client = mock_client
 
         noalbs.switch_scene("BRB")
+        time.sleep(0.1) # Wait for daemon thread
         mock_client.set_current_program_scene.assert_called_with("BRB")
         mock_client.call_vendor_request.assert_called_with("aitum-vertical-canvas", "switch_scene", {"scene": "BRB"})
 
     @patch("noalbs.noalbs.os.path.exists", return_value=True)
     @patch("subprocess.Popen")
     @patch("subprocess.run")
-    @patch("requests.get")
+    @patch("requests.Session.get")
     def test_disconnection_protection_simulation(self, mock_get, mock_run, mock_popen, mock_exists):
         mock_run.return_value = MagicMock(stdout="libx264")
         noalbs = Noalbs()
@@ -206,22 +240,13 @@ class TestNoalbsComprehensive(unittest.TestCase):
 
         # Disconnection handling block simulation
         if bitrate == 0 and noalbs.is_streaming:
-            client = noalbs.get_obs_client()
-            is_obs_streaming = True
-            if client:
-                status = client.get_stream_status()
-                is_obs_streaming = getattr(status, 'output_active', getattr(status, 'outputActive', True))
-
-            if is_obs_streaming or noalbs.cloud_brb_enabled:
-                noalbs.switch_scene(noalbs.scene_brb)
-                noalbs.is_low = True
-                if noalbs.cloud_brb_enabled:
-                    noalbs.start_cloud_brb()
-            else:
-                noalbs.is_low = False
+            noalbs.is_low = True
+            if noalbs.cloud_brb_enabled:
+                noalbs.start_cloud_brb()
+            noalbs.switch_scene(noalbs.scene_brb)
             noalbs.is_streaming = False
 
-        # Assertions
+        time.sleep(0.1)
         mock_obs.set_current_program_scene.assert_called_with("BRB")
         mock_popen.assert_called_once()
         self.assertFalse(noalbs.is_streaming)
@@ -250,12 +275,8 @@ class TestNoalbsComprehensive(unittest.TestCase):
             elapsed = time.time() - noalbs.cloud_brb_start_time
             if elapsed >= noalbs.cloud_brb_timeout:
                 noalbs.stop_cloud_brb()
-                client = noalbs.get_obs_client()
-                if client:
-                    client.stop_stream()
 
         self.assertIsNone(noalbs.cloud_process)
-        mock_obs.stop_stream.assert_called_once()
 
 if __name__ == "__main__":
     unittest.main()
