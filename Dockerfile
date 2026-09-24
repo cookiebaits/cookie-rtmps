@@ -6,7 +6,7 @@ ENV NGINX_RTMP_MODULE_VERSION=cookie-nginx-rtmp
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends python3 python3-pip && \
-    pip3 install --break-system-packages flask gunicorn requests obsws-python flask-session twitchio google-api-python-client eventlet flask-socketio edge-tts && \
+    pip3 install --break-system-packages flask gunicorn requests obsws-python && \
     apt-get install -y --no-install-recommends ca-certificates openssl libssl-dev stunnel4 gettext certbot ffmpeg && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* && \

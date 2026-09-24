@@ -49,19 +49,13 @@ You'd need a VPS server. Key considerations:
     *   Configure your stream keys and set any desired optimizations (like NGINX `chunk_size`).
     *   Select "Build & Start Server" to launch your customized RTMP relay.
 
-*   3- **TikTok Auto-Pusher Configuration (Optional):**
-    *   If you want to stream to TikTok without installing their official desktop software due to privacy concerns, CookieRTMPS has a built-in Streamlabs Auto-Pusher.
-    *   In the `install.sh` menu, under Horizontal or Vertical stream keys, select **TikTok**, then choose option **3) Streamlabs Auto-Pusher (Bypass TikTok Studio)**.
-    *   You will be prompted to enter your Streamlabs API Token, a Stream Title, and an optional Game ID.
-    *   CookieRTMPS will automatically spin up a secure, invisible relay pushing your feed directly to TikTok via Streamlabs the moment your stream goes live!
-
-*   4- **Configure OBS (or other streaming software):**
+*   3- **Configure OBS (or other streaming software):**
     *   Service: `Custom...`
     *   **Horizontal Server:** `rtmp://<your_vps_ip_address>:1935/live`
     *   **Vertical Server:** `rtmp://<your_vps_ip_address>:1935/vertical` (For Aitum Vertical)
     *   Stream Key: **Use ONE of the actual stream keys you configured during the setup process** (or the custom Master OBS Key if you set one).
 
-*   5- **Begin streaming from OBS!**
+*   4- **Begin streaming from OBS!**
 
 We advise testing with one or two destinations first.
 

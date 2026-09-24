@@ -5,15 +5,12 @@ from urllib.parse import parse_qs
 import threading
 import subprocess
 from datetime import datetime
-import ipaddress
 
 app = Flask(__name__)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
-
-active_pushers = {}
 
 # Configuration
 VALID_KEYS = []
@@ -53,38 +50,6 @@ else:
 
 if ACCEPTED_IP:
     app.logger.info(f"IP Whitelist active: {ACCEPTED_IP}")
-
-def is_ip_allowed(client_ip_str, accepted_ip_setting):
-    if not accepted_ip_setting:
-        return True
-    try:
-        if ':' in client_ip_str and not client_ip_str.startswith('['):
-            parts = client_ip_str.split(':')
-            if len(parts) == 2:
-                client_ip_str = parts[0]
-        client_ip = ipaddress.ip_address(client_ip_str)
-        # Always permit loopback addresses (127.0.0.1)
-        if client_ip.is_loopback:
-            return True
-
-        for item in accepted_ip_setting.split(','):
-            item = item.strip()
-            if not item:
-                continue
-            try:
-                if '/' in item:
-                    net = ipaddress.ip_network(item, strict=False)
-                    if client_ip in net:
-                        return True
-                else:
-                    allowed_ip = ipaddress.ip_address(item)
-                    if client_ip == allowed_ip:
-                        return True
-            except ValueError:
-                continue
-    except ValueError:
-        pass
-    return False
 
 def get_episode_count():
     try:
@@ -140,7 +105,7 @@ def validate():
         client_ip = parsed_data.get('addr', [request.remote_addr])[0]
 
     # IP Whitelist Check
-    if ACCEPTED_IP and not is_ip_allowed(client_ip, ACCEPTED_IP):
+    if ACCEPTED_IP and client_ip != ACCEPTED_IP:
         app.logger.warning(f"REJECTED IP: {client_ip}")
         return Response('IP not whitelisted', status=403)
 
@@ -148,31 +113,10 @@ def validate():
     if not VALID_KEYS:
         return Response('No keys configured', status=403)
 
-    if stream_key_attempt in VALID_KEYS or stream_key_attempt.startswith('cloud_brb'):
-        app.logger.info(f"ACCEPTED stream from {client_ip} (Key: {stream_key_attempt})")
-        if stream_key_attempt.startswith('cloud_brb'):
-            return Response('OK', status=200)
-
+    if stream_key_attempt in VALID_KEYS:
+        app.logger.info(f"ACCEPTED stream from {client_ip}")
         # Update titles in background to not block Nginx
         threading.Thread(target=run_update_titles).start()
-        
-        app_name = parsed_data.get('app', [''])[0]
-        pusher_key = f"{app_name}_{stream_key_attempt}"
-        
-        if app_name == os.getenv('APP_NAME', 'live') and os.getenv('TIKTOK_URL') == "auto":
-            if pusher_key not in active_pushers:
-                app.logger.info(f"Starting TikTok auto-pusher for horizontal stream...")
-                active_pushers[pusher_key] = subprocess.Popen(
-                    ['python3', '/app/tiktok_pusher.py', f"rtmp://127.0.0.1:1935/{app_name}/{stream_key_attempt}"]
-                )
-        
-        if app_name == 'vertical' and os.getenv('V_TIKTOK_URL') == "auto":
-            if pusher_key not in active_pushers:
-                app.logger.info(f"Starting TikTok auto-pusher for vertical stream...")
-                active_pushers[pusher_key] = subprocess.Popen(
-                    ['python3', '/app/tiktok_pusher.py', f"rtmp://127.0.0.1:1935/{app_name}/{stream_key_attempt}"]
-                )
-
         return Response('OK', status=200)
     else:
         app.logger.warning(f"REJECTED invalid key from {client_ip}")
@@ -182,24 +126,6 @@ def validate():
 def publish_done():
     # Nginx sends GET by default for on_publish_done in some versions, but usually POST
     app_name = request.args.get('app', '')
-    stream_key = request.args.get('name', '')
-    
-    if not app_name or not stream_key:
-        raw_data = request.get_data(as_text=True)
-        parsed_data = parse_qs(raw_data)
-        app_name = parsed_data.get('app', [app_name])[0]
-        stream_key = parsed_data.get('name', [stream_key])[0]
-
-    if stream_key.startswith('cloud_brb'):
-        return Response('OK', status=200)
-
-    pusher_key = f"{app_name}_{stream_key}"
-    
-    if pusher_key in active_pushers:
-        app.logger.info(f"Terminating TikTok auto-pusher for {pusher_key}...")
-        active_pushers[pusher_key].terminate()
-        del active_pushers[pusher_key]
-
     if app_name == os.getenv('APP_NAME', 'live'):
         # Increment episode count when horizontal stream finishes
         increment_episode_count()

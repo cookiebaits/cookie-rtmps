@@ -17,9 +17,6 @@ INSTAGRAM_URL="rtmp://127.0.0.1:19351/rtmp/"
 INSTAGRAM_KEY=""
 TIKTOK_URL="rtmp://127.0.0.1:19358/s_v/"
 TIKTOK_KEY=""
-TIKTOK_SL_TOKEN=""
-TIKTOK_TITLE=""
-TIKTOK_GAME_ID=""
 TWITCH_URL="rtmp://127.0.0.1:19353/app/"
 TWITCH_KEY=""
 KICK_URL="rtmp://127.0.0.1:19356/kick/"
@@ -101,9 +98,6 @@ INSTAGRAM_URL="$INSTAGRAM_URL"
 INSTAGRAM_KEY="$INSTAGRAM_KEY"
 TIKTOK_URL="$TIKTOK_URL"
 TIKTOK_KEY="$TIKTOK_KEY"
-TIKTOK_SL_TOKEN="$TIKTOK_SL_TOKEN"
-TIKTOK_TITLE="$TIKTOK_TITLE"
-TIKTOK_GAME_ID="$TIKTOK_GAME_ID"
 TWITCH_URL="$TWITCH_URL"
 TWITCH_KEY="$TWITCH_KEY"
 KICK_URL="$KICK_URL"
@@ -341,7 +335,6 @@ configure_keys() {
                echo -e "Select TikTok Server:"
                echo "  1) Secure (rtmps://push-rtmp-f5-ap-southeast-1.tiktokcdn.com:443 -> via Stunnel)"
                echo "  2) Custom URL"
-               echo "  3) Streamlabs Auto-Pusher (Bypass TikTok Studio)"
                echo -e "Option (Current URL: $TIKTOK_URL): \c"
                read -r tt_opt
                case $tt_opt in
@@ -352,15 +345,6 @@ configure_keys() {
                       if [ ! -z "$tt_url" ]; then
                           TIKTOK_URL="$tt_url"
                       fi
-                      ;;
-                   3)
-                      TIKTOK_URL="auto"
-                      echo -e "Enter Streamlabs Token: \c"
-                      read -r TIKTOK_SL_TOKEN
-                      echo -e "Enter Stream Title: \c"
-                      read -r TIKTOK_TITLE
-                      echo -e "Enter Game ID (Optional): \c"
-                      read -r TIKTOK_GAME_ID
                       ;;
                esac
                save_config
@@ -586,7 +570,6 @@ configure_vertical_keys() {
                echo -e "Select TikTok Server:"
                echo "  1) Secure (rtmps://push-rtmp-f5-ap-southeast-1.tiktokcdn.com:443 -> via Stunnel)"
                echo "  2) Custom URL"
-               echo "  3) Streamlabs Auto-Pusher (Bypass TikTok Studio)"
                echo -e "Option (Current URL: $V_TIKTOK_URL): \c"
                read -r tt_opt
                case $tt_opt in
@@ -597,15 +580,6 @@ configure_vertical_keys() {
                       if [ ! -z "$tt_url" ]; then
                           V_TIKTOK_URL="$tt_url"
                       fi
-                      ;;
-                   3)
-                      V_TIKTOK_URL="auto"
-                      echo -e "Enter Streamlabs Token: \c"
-                      read -r TIKTOK_SL_TOKEN
-                      echo -e "Enter Stream Title: \c"
-                      read -r TIKTOK_TITLE
-                      echo -e "Enter Game ID (Optional): \c"
-                      read -r TIKTOK_GAME_ID
                       ;;
                esac
                save_config
@@ -1029,20 +1003,13 @@ configure_noalbs() {
                 save_config
                 ;;
             10)
-                echo -e "Enter BRB Video URL (Direct MP4 link, or type 'disable'/'clear' to remove):"
+                echo -e "Enter BRB Video URL (Direct MP4 link):"
                 read -r input
-                if [ "$input" == "disable" ] || [ "$input" == "clear" ] || [ "$input" == "DISABLE" ] || [ "$input" == "CLEAR" ]; then
-                    BRB_VIDEO_URL=""
-                    save_config
-                    rm -f ./data/brb_video.mp4
-                    echo -e "${GREEN}Cleared BRB Video URL and removed cached video.${NC}"
-                    sleep 1
-                elif [ ! -z "$input" ]; then
+                if [ ! -z "$input" ]; then
                     BRB_VIDEO_URL="$input"
                     save_config
                     mkdir -p ./data
-                    rm -f ./data/brb_video.mp4
-                    echo -e "${YELLOW}Downloading BRB video from $BRB_VIDEO_URL ...${NC}"
+                    echo -e "${YELLOW}Downloading BRB video...${NC}"
                     curl -L "$BRB_VIDEO_URL" -o ./data/brb_video.mp4 && echo -e "${GREEN}Downloaded.${NC}" || echo -e "${RED}Download failed.${NC}"
                     sleep 2
                 fi
@@ -1102,11 +1069,15 @@ build_and_run() {
         return
     fi
 
-    echo -e "${YELLOW}Stopping and removing any old container instances...${NC}"
+    echo -e "${YELLOW}Stopping and removing any old rtmps instances...${NC}"
     OLD_CONTAINERS=$(docker ps -a --format '{{.ID}} {{.Names}}' | grep -i rtmps | awk '{print $1}')
     if [ ! -z "$OLD_CONTAINERS" ]; then
         docker stop $OLD_CONTAINERS 2>/dev/null || true
         docker rm $OLD_CONTAINERS 2>/dev/null || true
+    fi
+    OLD_IMAGES=$(docker images --format '{{.ID}} {{.Repository}}' | grep -i rtmps | awk '{print $1}')
+    if [ ! -z "$OLD_IMAGES" ]; then
+        docker rmi -f $OLD_IMAGES 2>/dev/null || true
     fi
 
     echo -e "${YELLOW}Checking for port conflicts...${NC}"
@@ -1187,17 +1158,14 @@ build_and_run() {
         return
     fi
 
-    mkdir -p ./data
-    if [ -f "./data/brb_video.mp4" ]; then
-        echo -e "${GREEN}Existing BRB video found at ./data/brb_video.mp4. Preserving video source.${NC}"
-    else
-        if [ -z "$BRB_VIDEO_URL" ]; then
-            echo -e "${YELLOW}BRB Video URL is empty and no cached video exists. Setting to default...${NC}"
-            BRB_VIDEO_URL="https://filedn.com/lfh40bKbFfD5um9HDFNrJFR/brb.mp4"
-            save_config
-        fi
-        echo -e "${YELLOW}Downloading BRB video from $BRB_VIDEO_URL ...${NC}"
-        curl -L "$BRB_VIDEO_URL" -o ./data/brb_video.mp4 && echo -e "${GREEN}Downloaded BRB video.${NC}" || echo -e "${RED}Failed to download BRB video.${NC}"
+    if [ "$CLOUD_BRB" == "true" ] && [ -z "$BRB_VIDEO_URL" ]; then
+        echo -e "${YELLOW}Cloud BRB is enabled but BRB Video URL is empty. Setting to default...${NC}"
+        BRB_VIDEO_URL="https://filedn.com/lfh40bKbFfD5um9HDFNrJFR/brb.mp4"
+        save_config
+        mkdir -p ./data
+        rm -f ./data/brb_video.mp4
+        echo -e "${YELLOW}Downloading default BRB video...${NC}"
+        curl -L "$BRB_VIDEO_URL" -o ./data/brb_video.mp4 && echo -e "${GREEN}Downloaded default BRB video.${NC}" || echo -e "${RED}Failed to download BRB video.${NC}"
     fi
 
     echo -e "${GREEN}Building Docker Image...${NC}"
@@ -1227,9 +1195,6 @@ build_and_run() {
         -e INSTAGRAM_KEY="$INSTAGRAM_KEY" \
         -e TIKTOK_URL="$TIKTOK_URL" \
         -e TIKTOK_KEY="$TIKTOK_KEY" \
-        -e TIKTOK_SL_TOKEN="$TIKTOK_SL_TOKEN" \
-        -e TIKTOK_TITLE="$TIKTOK_TITLE" \
-        -e TIKTOK_GAME_ID="$TIKTOK_GAME_ID" \
         -e TWITCH_URL="$TWITCH_URL" \
         -e TWITCH_KEY="$TWITCH_KEY" \
         -e KICK_URL="$KICK_URL" \
@@ -1310,34 +1275,9 @@ view_logs() {
         return
     fi
 
-    echo -e "${YELLOW}Showing live logs for cookie-rtmps (Filtering /stat polling requests)...${NC}"
-    echo -e "${YELLOW}(Press Ctrl+C to exit log view)${NC}\n"
+    echo -e "${YELLOW}Showing logs for cookie-rtmps... (Press Ctrl+C to exit log view)${NC}"
     # Use a subshell and trap INT to ensure script doesn't exit on Ctrl+C
-    (
-        trap 'exit 0' INT
-        docker logs --since 24h -f cookie-rtmps 2>&1 | awk '
-            /GET \/stat HTTP/ { next }
-            /ERROR|error|FAIL|fail|REJECTED|disconnect|Disconnect|failed|Failed/ {
-                print "\033[0;31m" $0 "\033[0m"
-                fflush()
-                next
-            }
-            /WARNING|warning|LOW|low|taking over/ {
-                print "\033[1;33m" $0 "\033[0m"
-                fflush()
-                next
-            }
-            /NOALBS|Cloud BRB/ {
-                print "\033[0;36m" $0 "\033[0m"
-                fflush()
-                next
-            }
-            {
-                print $0
-                fflush()
-            }
-        '
-    )
+    (trap 'exit 0' INT; docker logs -f cookie-rtmps)
 
     while true; do
         echo -e "\n${GREEN}=== Log Options ===${NC}"
@@ -1371,33 +1311,10 @@ stop_and_uninstall() {
         sleep 2
         return
     fi
-    echo -e "${YELLOW}Stopping services and performing complete removal...${NC}"
-    OLD_CONTAINERS=$(docker ps -a --format '{{.ID}} {{.Names}}' | grep -i rtmps | awk '{print $1}')
-    if [ ! -z "$OLD_CONTAINERS" ]; then
-        docker stop $OLD_CONTAINERS 2>/dev/null && echo -e "${GREEN}Containers stopped.${NC}" || true
-        docker rm $OLD_CONTAINERS 2>/dev/null && echo -e "${GREEN}Containers removed, ports unbound.${NC}" || true
-    else
-        docker stop cookie-rtmps 2>/dev/null && echo -e "${GREEN}Container stopped.${NC}" || echo -e "${RED}Container not running.${NC}"
-        docker rm cookie-rtmps 2>/dev/null && echo -e "${GREEN}Container removed, ports unbound.${NC}" || true
-    fi
-
-    OLD_IMAGES=$(docker images --format '{{.ID}} {{.Repository}}' | grep -i rtmps | awk '{print $1}')
-    if [ ! -z "$OLD_IMAGES" ]; then
-        docker rmi -f $OLD_IMAGES 2>/dev/null && echo -e "${GREEN}Images removed.${NC}" || true
-    else
-        docker rmi cookie-rtmps 2>/dev/null && echo -e "${GREEN}Image removed.${NC}" || true
-    fi
-
-    echo -e "${YELLOW}Pruning Docker build cache and unused images...${NC}"
-    docker image prune -f 2>/dev/null || true
-    docker builder prune -f 2>/dev/null || true
-
-    echo -e "${YELLOW}Removing local configuration files and data cache...${NC}"
-    rm -f rtmp_config.env
-    rm -rf ./data
-    echo -e "${GREEN}Local configuration and data removed.${NC}"
-
-    echo -e "${GREEN}CookieRTMPS and all cached components have been completely removed.${NC}"
+    echo -e "${YELLOW}Stopping services and uninstalling...${NC}"
+    docker stop cookie-rtmps 2>/dev/null && echo -e "${GREEN}Container stopped.${NC}" || echo -e "${RED}Container not running.${NC}"
+    docker rm cookie-rtmps 2>/dev/null && echo -e "${GREEN}Container removed, ports unbound.${NC}" || true
+    docker rmi cookie-rtmps 2>/dev/null && echo -e "${GREEN}Image removed. CookieRTMPS has been completely removed from Docker.${NC}" || true
     sleep 3
 }
 
