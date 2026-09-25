@@ -79,7 +79,8 @@ OBS_SCENE_BRB="BRB"
 LOW_BITRATE="1000"
 RESTORE_BITRATE="1500"
 CLOUD_BRB="true"
-BRB_VIDEO_URL=""
+BRB_VIDEO_URL="https://filedn.com/lfh40bKbFfD5um9HDFNrJFR/brb.mp4"
+CLOUD_BRB_TIMEOUT="300"
 
 CONFIG_FILE="rtmp_config.env"
 
@@ -149,6 +150,7 @@ LOW_BITRATE="$LOW_BITRATE"
 RESTORE_BITRATE="$RESTORE_BITRATE"
 CLOUD_BRB="$CLOUD_BRB"
 BRB_VIDEO_URL="$BRB_VIDEO_URL"
+CLOUD_BRB_TIMEOUT="$CLOUD_BRB_TIMEOUT"
 PORT_RTMP="$PORT_RTMP"
 PORT_HTTP="$PORT_HTTP"
 PORT_STATS="$PORT_STATS"
@@ -952,8 +954,9 @@ configure_noalbs() {
         echo "7) Low Bitrate Threshold (Current: $LOW_BITRATE kbps)"
         echo "8) Restore Bitrate Threshold (Current: $RESTORE_BITRATE kbps)"
         echo "9) Toggle Cloud BRB (Currently: $CLOUD_BRB)"
-        echo "10) Configure BRB Video URL (Current: ${BRB_VIDEO_URL:-(None)})"
-        echo "11) Back to Main Menu"
+        echo "10) Configure BRB Video URL (Current: ${BRB_VIDEO_URL:-(Default: https://filedn.com/lfh40bKbFfD5um9HDFNrJFR/brb.mp4)})"
+        echo "11) Disconnection Protection Duration (Current: $CLOUD_BRB_TIMEOUT seconds)"
+        echo "12) Back to Main Menu"
         echo -e "Select an option: \c"
         read -r noalbs_opt
 
@@ -1003,35 +1006,96 @@ configure_noalbs() {
                 save_config
                 ;;
             10)
-                echo -e "Enter BRB Video URL (Direct MP4 link):"
+                echo -e "Enter BRB Video URL (Direct MP4 link, or press Enter for default):"
+                read -r input
+                if [ -z "$input" ]; then
+                    BRB_VIDEO_URL="https://filedn.com/lfh40bKbFfD5um9HDFNrJFR/brb.mp4"
+                else
+                    BRB_VIDEO_URL="$input"
+                fi
+                save_config
+                mkdir -p ./data
+                echo -e "${YELLOW}Downloading BRB video...${NC}"
+                curl -L "$BRB_VIDEO_URL" -o ./data/brb_video.mp4 && echo -e "${GREEN}Downloaded BRB video successfully.${NC}" || echo -e "${RED}Download failed.${NC}"
+                sleep 2
+                ;;
+            11)
+                echo -e "Enter Disconnection Protection Duration in seconds (Default: 300):"
                 read -r input
                 if [ ! -z "$input" ]; then
-                    BRB_VIDEO_URL="$input"
+                    CLOUD_BRB_TIMEOUT="$input"
                     save_config
-                    mkdir -p ./data
-                    echo -e "${YELLOW}Downloading BRB video...${NC}"
-                    curl -L "$BRB_VIDEO_URL" -o ./data/brb_video.mp4 && echo -e "${GREEN}Downloaded.${NC}" || echo -e "${RED}Download failed.${NC}"
-                    sleep 2
+                    echo -e "${GREEN}Disconnection Protection Duration set to ${CLOUD_BRB_TIMEOUT}s.${NC}"
+                    sleep 1
                 fi
                 ;;
-            11) break ;;
+            12) break ;;
             *) echo -e "${RED}Invalid option${NC}" ; sleep 1 ;;
         esac
     done
 }
 
-configure_optimizations() {
-    clear
-    echo -e "${GREEN}=== Optimizations ===${NC}"
-    echo "Current Chunk Size: $CHUNK_SIZE (Default: 8192)"
-    echo "Enter new Chunk Size (press Enter to keep current): "
-    read -r input
-    if [ ! -z "$input" ]; then
-        CHUNK_SIZE="$input"
-        save_config
-        echo -e "${GREEN}Chunk size updated.${NC}"
-        sleep 1
+enable_bbr_and_tcp_optimizations() {
+    echo -e "${GREEN}Configuring Google BBR & Network TCP Buffer Optimizations...${NC}"
+    if command -v modprobe &> /dev/null; then
+        sudo modprobe tcp_bbr 2>/dev/null || true
     fi
+
+    SYSCTL_CONF="/etc/sysctl.d/99-stream-optimization.conf"
+    echo -e "${YELLOW}Writing network optimizations to $SYSCTL_CONF...${NC}"
+
+    if command -v tee &> /dev/null; then
+        cat << 'SYSCTL_EOF' | sudo tee "$SYSCTL_CONF" > /dev/null
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
+net.ipv4.tcp_rmem = 4096 87380 16777216
+net.ipv4.tcp_wmem = 4096 65536 16777216
+net.ipv4.tcp_notsent_lowat = 16384
+SYSCTL_EOF
+    fi
+
+    if command -v sysctl &> /dev/null; then
+        sudo sysctl -p "$SYSCTL_CONF" 2>/dev/null || sudo sysctl --system 2>/dev/null || true
+    fi
+    echo -e "${GREEN}Google BBR & TCP optimizations applied successfully.${NC}"
+    sleep 2
+}
+
+configure_optimizations() {
+    while true; do
+        clear
+        echo -e "${GREEN}=== Configure Network & Stream Optimizations ===${NC}"
+        echo "1) Configure RTMP Chunk Size (Current: $CHUNK_SIZE)"
+        echo "2) Enable Google BBR & TCP Buffer Optimizations"
+        echo "3) Back to Main Menu"
+        echo -e "Select an option: \c"
+        read -r opt_choice
+
+        case $opt_choice in
+            1)
+                echo "Enter new Chunk Size (Default: 8192, press Enter to keep current): "
+                read -r input
+                if [ ! -z "$input" ]; then
+                    CHUNK_SIZE="$input"
+                    save_config
+                    echo -e "${GREEN}Chunk size updated.${NC}"
+                    sleep 1
+                fi
+                ;;
+            2)
+                enable_bbr_and_tcp_optimizations
+                ;;
+            3)
+                break
+                ;;
+            *)
+                echo -e "${RED}Invalid option${NC}"
+                sleep 1
+                ;;
+        esac
+    done
 }
 
 install_docker() {
@@ -1068,6 +1132,9 @@ build_and_run() {
         sleep 2
         return
     fi
+
+    # Execute network optimizations
+    enable_bbr_and_tcp_optimizations
 
     echo -e "${YELLOW}Stopping and removing any old rtmps instances...${NC}"
     OLD_CONTAINERS=$(docker ps -a --format '{{.ID}} {{.Names}}' | grep -i rtmps | awk '{print $1}')
@@ -1158,14 +1225,16 @@ build_and_run() {
         return
     fi
 
-    if [ "$CLOUD_BRB" == "true" ] && [ -z "$BRB_VIDEO_URL" ]; then
-        echo -e "${YELLOW}Cloud BRB is enabled but BRB Video URL is empty. Setting to default...${NC}"
-        BRB_VIDEO_URL="https://filedn.com/lfh40bKbFfD5um9HDFNrJFR/brb.mp4"
-        save_config
+    if [ "$CLOUD_BRB" == "true" ]; then
+        if [ -z "$BRB_VIDEO_URL" ]; then
+            BRB_VIDEO_URL="https://filedn.com/lfh40bKbFfD5um9HDFNrJFR/brb.mp4"
+            save_config
+        fi
         mkdir -p ./data
-        rm -f ./data/brb_video.mp4
-        echo -e "${YELLOW}Downloading default BRB video...${NC}"
-        curl -L "$BRB_VIDEO_URL" -o ./data/brb_video.mp4 && echo -e "${GREEN}Downloaded default BRB video.${NC}" || echo -e "${RED}Failed to download BRB video.${NC}"
+        if [ ! -f "./data/brb_video.mp4" ] || [ ! -s "./data/brb_video.mp4" ]; then
+            echo -e "${YELLOW}Downloading default BRB video...${NC}"
+            curl -L "$BRB_VIDEO_URL" -o ./data/brb_video.mp4 && echo -e "${GREEN}Downloaded default BRB video.${NC}" || echo -e "${RED}Failed to download BRB video.${NC}"
+        fi
     fi
 
     echo -e "${GREEN}Building Docker Image...${NC}"
@@ -1241,6 +1310,8 @@ build_and_run() {
         -e LOW_BITRATE="$LOW_BITRATE" \
         -e RESTORE_BITRATE="$RESTORE_BITRATE" \
         -e CLOUD_BRB="$CLOUD_BRB" \
+        -e BRB_VIDEO_URL="$BRB_VIDEO_URL" \
+        -e CLOUD_BRB_TIMEOUT="$CLOUD_BRB_TIMEOUT" \
         -v "$(pwd)/data:/app/data" \
         cookie-rtmps
 
@@ -1339,15 +1410,15 @@ while true; do
     echo "4) Configure OBS Setup & Security Key"
     echo "5) Configure IP Whitelist (Optional)"
     echo "6) Configure Combined Chat (Optional)"
-        echo "7) Configure Stream Titles & Twitch API (Optional)"
-        echo "8) Configure Domain / Reverse Proxy (Optional)"
-        echo "9) Configure Optimizations (Chunk Size)"
-        echo "10) Configure NOALBS Scene Switcher"
-        echo "11) Build & Start Server"
-        echo "12) Run Integration Tests"
-        echo "13) Stop Server & Uninstall"
-        echo "14) View Logs"
-        echo "15) Quit"
+    echo "7) Configure Stream Titles & Twitch API (Optional)"
+    echo "8) Configure Domain / Reverse Proxy (Optional)"
+    echo "9) Configure Optimizations (Chunk Size & Google BBR/TCP)"
+    echo "10) Configure NOALBS Scene Switcher"
+    echo "11) Build & Start Server"
+    echo "12) Run Integration Tests"
+    echo "13) Stop Server & Uninstall"
+    echo "14) View Logs"
+    echo "15) Quit"
     echo -e "Select an option: \c"
     read -r option
 

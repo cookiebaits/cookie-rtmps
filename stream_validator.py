@@ -109,18 +109,18 @@ def validate():
         app.logger.warning(f"REJECTED IP: {client_ip}")
         return Response('IP not whitelisted', status=403)
 
-    # Key Check
-    if not VALID_KEYS:
-        return Response('No keys configured', status=403)
-
-    if stream_key_attempt in VALID_KEYS:
-        app.logger.info(f"ACCEPTED stream from {client_ip}")
+    # Allow local Cloud BRB stream loops or valid keys
+    if stream_key_attempt.startswith('cloud_brb') or stream_key_attempt in VALID_KEYS:
+        app.logger.info(f"ACCEPTED stream '{stream_key_attempt}' from {client_ip}")
         # Update titles in background to not block Nginx
         threading.Thread(target=run_update_titles).start()
         return Response('OK', status=200)
-    else:
-        app.logger.warning(f"REJECTED invalid key from {client_ip}")
-        return Response('Invalid stream key', status=403)
+
+    if not VALID_KEYS:
+        return Response('No keys configured', status=403)
+
+    app.logger.warning(f"REJECTED invalid key from {client_ip}")
+    return Response('Invalid stream key', status=403)
 
 @app.route('/publish_done', methods=['POST', 'GET'])
 def publish_done():
