@@ -228,8 +228,43 @@ ensure_brb_video_transcoded() {
         echo -e "${GREEN}Download successful.${NC}"
         if command -v ffmpeg &> /dev/null; then
             echo -e "${YELLOW}Verifying and transcoding BRB video for FFmpeg AAC/H.264 RTMP compatibility...${NC}"
-            ffmpeg -y -i "$raw_file" -c:v libx264 -pix_fmt yuv420p -g 60 -c:a aac -ar 48000 -ac 2 "$final_file" >/dev/null 2>&1
-            if [ $? -eq 0 ]; then
+
+            local duration_us=""
+            if command -v ffprobe &> /dev/null; then
+                duration_us=$(ffprobe -v error -show_entries format=duration -of default=noprintwrappers=1:nokey=1 "$raw_file" 2>/dev/null | awk '{print int($1 * 1000000)}')
+            fi
+
+            if [ -z "$duration_us" ] || [ "$duration_us" -le 0 ]; then
+                duration_sec=$(ffmpeg -i "$raw_file" 2>&1 | grep "Duration" | awk '{print $2}' | tr -d ',')
+                if [ ! -z "$duration_sec" ]; then
+                    hours=$(echo "$duration_sec" | cut -d: -f1)
+                    mins=$(echo "$duration_sec" | cut -d: -f2)
+                    secs=$(echo "$duration_sec" | cut -d: -f3)
+                    duration_us=$(awk -v h="$hours" -v m="$mins" -v s="$secs" 'BEGIN { print int((h*3600 + m*60 + s)*1000000) }')
+                fi
+            fi
+
+            if [ -z "$duration_us" ] || [ "$duration_us" -le 0 ]; then
+                duration_us=10000000 # 10s fallback estimate if unknown
+            fi
+
+            ffmpeg -y -progress pipe:1 -i "$raw_file" -c:v libx264 -pix_fmt yuv420p -g 60 -c:a aac -ar 48000 -ac 2 "$final_file" 2>/dev/null | awk -v total="$duration_us" '
+            /out_time_us=/ {
+                split($0, a, "=");
+                us = a[2] + 0;
+                pct = int((us / total) * 100);
+                if (pct > 100) pct = 100;
+                filled = int(pct / 5);
+                empty = 20 - filled;
+                bar = "";
+                for (i = 0; i < filled; i++) bar = bar "█";
+                for (i = 0; i < empty; i++) bar = bar "-";
+                printf("\rProgress: [%s] %d%%", bar, pct);
+                fflush();
+            }
+            END { printf("\rProgress: [████████████████████] 100%%\n"); fflush(); }'
+
+            if [ ${PIPESTATUS[0]} -eq 0 ] && [ -f "$final_file" ] && [ -s "$final_file" ]; then
                 echo -e "${GREEN}BRB video successfully transcoded and verified.${NC}"
                 rm -f "$raw_file"
                 return 0
