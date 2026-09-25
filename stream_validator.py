@@ -99,6 +99,11 @@ def validate():
     parsed_data = parse_qs(raw_data)
     stream_key_attempt = parsed_data.get('name', [''])[0]
 
+    # Permit Cloud BRB internal streams
+    if stream_key_attempt.startswith('cloud_brb'):
+        app.logger.info("ACCEPTED internal Cloud BRB loop stream")
+        return Response('OK', status=200)
+
     # Cloudflare Real IP or fallback
     client_ip = request.headers.get('CF-Connecting-IP', request.remote_addr)
     if not client_ip or client_ip == '127.0.0.1':
