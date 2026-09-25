@@ -23,9 +23,10 @@ class Noalbs:
         self.app_name = os.getenv("APP_NAME", "live")
         self.stats_url = "http://127.0.0.1:8081/stat"
 
+        DEFAULT_BRB_URL = "https://filedn.com/lfh40bKbFfD5um9HDFNrJFR/brb.mp4"
         self.cloud_brb_enabled = os.getenv("CLOUD_BRB", "true").lower() == "true"
         self.brb_video_path = os.getenv("BRB_VIDEO_PATH", "/app/data/brb_video.mp4")
-        self.brb_video_url = os.getenv("BRB_VIDEO_URL", "")
+        self.brb_video_url = os.getenv("BRB_VIDEO_URL") or DEFAULT_BRB_URL
         self.cloud_brb_timeout = int(os.getenv("CLOUD_BRB_TIMEOUT", 300))
         self.cloud_process = None
         self.cloud_brb_start_time = None
@@ -107,10 +108,14 @@ class Noalbs:
 
     def download_brb_video_if_missing(self):
         if os.path.exists(self.brb_video_path):
-            return True
+            try:
+                if os.path.getsize(self.brb_video_path) > 0:
+                    return True
+            except Exception:
+                return True
 
         download_url = self.brb_video_url or "https://filedn.com/lfh40bKbFfD5um9HDFNrJFR/brb.mp4"
-        logger.info(f"BRB video missing at {self.brb_video_path}. Attempting download from {download_url}...")
+        logger.info(f"BRB video missing or empty at {self.brb_video_path}. Attempting download from {download_url}...")
         try:
             os.makedirs(os.path.dirname(self.brb_video_path), exist_ok=True)
             res = requests.get(download_url, timeout=15, stream=True)

@@ -67,6 +67,12 @@ class TestNoalbsComprehensive(unittest.TestCase):
 """
         return xml
 
+    def test_default_brb_video_url_fallback(self):
+        if "BRB_VIDEO_URL" in os.environ:
+            del os.environ["BRB_VIDEO_URL"]
+        noalbs = Noalbs()
+        self.assertEqual(noalbs.brb_video_url, "https://filedn.com/lfh40bKbFfD5um9HDFNrJFR/brb.mp4")
+
     @patch("requests.get")
     def test_get_bitrate_calculation_and_filtering(self, mock_get):
         noalbs = Noalbs()

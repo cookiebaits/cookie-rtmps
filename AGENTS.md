@@ -1,5 +1,8 @@
 ## Developer Memory
 
+### System Base
+- **Base Image**: Debian Bookworm (Debian 12, `buildpack-deps:bookworm`). All components are verified compatible with Bookworm and updated to ensure no components use Debian Trixie 13.7.
+
 ### Nginx & RTMP Module
 - **Version**: Nginx 1.30.3 (stable) with local `cookie-nginx-rtmp` module.
 - **Hardening**: AMF recursion limit (128), no VLAs, `ngx_random()` handshakes, and fixed memory leaks in `ngx_rtmp_eval.c`.

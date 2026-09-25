@@ -79,7 +79,7 @@ OBS_SCENE_BRB="BRB"
 LOW_BITRATE="1000"
 RESTORE_BITRATE="1500"
 CLOUD_BRB="true"
-BRB_VIDEO_URL=""
+BRB_VIDEO_URL="https://filedn.com/lfh40bKbFfD5um9HDFNrJFR/brb.mp4"
 
 CONFIG_FILE="rtmp_config.env"
 
@@ -952,7 +952,7 @@ configure_noalbs() {
         echo "7) Low Bitrate Threshold (Current: $LOW_BITRATE kbps)"
         echo "8) Restore Bitrate Threshold (Current: $RESTORE_BITRATE kbps)"
         echo "9) Toggle Cloud BRB (Currently: $CLOUD_BRB)"
-        echo "10) Configure BRB Video URL (Current: ${BRB_VIDEO_URL:-(None)})"
+        echo "10) Configure BRB Video URL (Current: ${BRB_VIDEO_URL:-https://filedn.com/lfh40bKbFfD5um9HDFNrJFR/brb.mp4})"
         echo "11) Back to Main Menu"
         echo -e "Select an option: \c"
         read -r noalbs_opt

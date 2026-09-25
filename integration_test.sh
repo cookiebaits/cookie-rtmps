@@ -52,7 +52,7 @@ else
     echo -e "[${RED}FAILED${NC}]"
 fi
 
-# 4. Check NOALBS if enabled
+# 4. Check NOALBS if enabled and run NOALBS component tests
 NOALBS_ENABLED=$(docker exec $CONTAINER_NAME printenv NOALBS_ENABLED 2>/dev/null || echo "false")
 if [ "$NOALBS_ENABLED" == "true" ]; then
     echo -n "Checking NOALBS process... "
@@ -61,11 +61,30 @@ if [ "$NOALBS_ENABLED" == "true" ]; then
     else
         echo -e "[${RED}FAILED${NC}]"
     fi
+
+    echo -n "Running NOALBS component unit tests inside container... "
+    if docker exec $CONTAINER_NAME python3 -m unittest /app/test_noalbs.py > /dev/null 2>&1; then
+        echo -e "[${GREEN}PASSED${NC}]"
+    else
+        echo -e "[${RED}FAILED${NC}]"
+        echo -e "${RED}Error: NOALBS component unit tests failed.${NC}"
+        exit 1
+    fi
 else
     echo -e "NOALBS is ${YELLOW}DISABLED${NC}, skipping check."
 fi
 
-# 5. Check Host Ports
+# 5. Check Stream Validator unit tests inside container
+echo -n "Running Stream Validator unit tests inside container... "
+if docker exec $CONTAINER_NAME python3 -m unittest /app/test_validator.py > /dev/null 2>&1; then
+    echo -e "[${GREEN}PASSED${NC}]"
+else
+    echo -e "[${RED}FAILED${NC}]"
+    echo -e "${RED}Error: Stream Validator unit tests failed.${NC}"
+    exit 1
+fi
+
+# 6. Check Host Ports
 echo -n "Checking host port 1935 (RTMP)... "
 if command -v ss &> /dev/null; then
     if ss -tuln | grep -q ":1935 "; then
