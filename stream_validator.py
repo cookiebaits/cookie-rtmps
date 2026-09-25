@@ -5,6 +5,7 @@ from urllib.parse import parse_qs
 import threading
 import subprocess
 from datetime import datetime
+import ipaddress
 
 app = Flask(__name__)
 logging.basicConfig(
@@ -51,6 +52,53 @@ else:
 if ACCEPTED_IP:
     app.logger.info(f"IP Whitelist active: {ACCEPTED_IP}")
 
+def is_ip_allowed(ip_str, whitelist_str):
+    if not whitelist_str or not str(whitelist_str).strip():
+        return True
+    if not ip_str:
+        return False
+
+    raw = str(ip_str).strip()
+    if raw.startswith('[') and ']' in raw:
+        clean_ip = raw.split(']')[0].lstrip('[')
+    elif ':' in raw and raw.count(':') == 1:
+        clean_ip = raw.split(':')[0]
+    else:
+        clean_ip = raw
+
+    try:
+        ip_obj = ipaddress.ip_address(clean_ip)
+    except ValueError:
+        return False
+
+    if ip_obj.is_loopback:
+        return True
+
+    for item in str(whitelist_str).split(','):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            if '/' in item:
+                net = ipaddress.ip_network(item, strict=False)
+                if ip_obj in net:
+                    return True
+            else:
+                target_raw = item
+                if target_raw.startswith('[') and ']' in target_raw:
+                    target_clean = target_raw.split(']')[0].lstrip('[')
+                elif ':' in target_raw and target_raw.count(':') == 1:
+                    target_clean = target_raw.split(':')[0]
+                else:
+                    target_clean = target_raw
+                target_ip = ipaddress.ip_address(target_clean)
+                if ip_obj == target_ip:
+                    return True
+        except ValueError:
+            continue
+
+    return False
+
 def get_episode_count():
     try:
         if not os.path.exists(EPISODE_FILE):
@@ -88,8 +136,6 @@ def run_update_titles():
     try:
         # Call the update script
         subprocess.run(['python3', '/app/update_titles.py', full_title], check=False)
-        # Note: We don't increment here to avoid double increments from dual horizontal/vertical streams
-        # We'll increment on publish_done of the primary app.
     except Exception as e:
         app.logger.error(f"Failed to update titles: {e}")
 
@@ -99,13 +145,18 @@ def validate():
     parsed_data = parse_qs(raw_data)
     stream_key_attempt = parsed_data.get('name', [''])[0]
 
+    if stream_key_attempt.startswith('cloud_brb'):
+        app.logger.info("ACCEPTED Cloud BRB stream.")
+        return Response('OK', status=200)
+
     # Cloudflare Real IP or fallback
     client_ip = request.headers.get('CF-Connecting-IP', request.remote_addr)
     if not client_ip or client_ip == '127.0.0.1':
         client_ip = parsed_data.get('addr', [request.remote_addr])[0]
 
     # IP Whitelist Check
-    if ACCEPTED_IP and client_ip != ACCEPTED_IP:
+    effective_whitelist = ACCEPTED_IP
+    if not is_ip_allowed(client_ip, effective_whitelist):
         app.logger.warning(f"REJECTED IP: {client_ip}")
         return Response('IP not whitelisted', status=403)
 
@@ -124,10 +175,8 @@ def validate():
 
 @app.route('/publish_done', methods=['POST', 'GET'])
 def publish_done():
-    # Nginx sends GET by default for on_publish_done in some versions, but usually POST
     app_name = request.args.get('app', '')
     if app_name == os.getenv('APP_NAME', 'live'):
-        # Increment episode count when horizontal stream finishes
         increment_episode_count()
         app.logger.info("Horizontal stream finished. Episode count incremented.")
     return Response('OK', status=200)

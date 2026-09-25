@@ -77,6 +77,21 @@ else
     echo -e "[${YELLOW}SKIPPED${NC}] (ss command not found)"
 fi
 
+# 6. Run Python Unit Tests inside Container
+echo -n "Running Python unit test (/app/test_noalbs.py)... "
+if docker exec $CONTAINER_NAME python3 /app/test_noalbs.py > /dev/null 2>&1; then
+    echo -e "[${GREEN}PASSED${NC}]"
+else
+    echo -e "[${RED}FAILED${NC}]"
+fi
+
+echo -n "Running Python unit test (/app/test_validator.py)... "
+if docker exec $CONTAINER_NAME python3 /app/test_validator.py > /dev/null 2>&1; then
+    echo -e "[${GREEN}PASSED${NC}]"
+else
+    echo -e "[${RED}FAILED${NC}]"
+fi
+
 echo -e "${BLUE}=====================================${NC}"
 echo -e "${GREEN}Integration Test Completed.${NC}"
 echo -e "${BLUE}=====================================${NC}"

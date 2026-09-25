@@ -1020,6 +1020,24 @@ configure_noalbs() {
     done
 }
 
+enable_bbr_and_tcp_optimizations() {
+    echo -e "${GREEN}Configuring Google BBR & Network TCP Buffer Optimizations...${NC}"
+    sudo modprobe tcp_bbr 2>/dev/null || modprobe tcp_bbr 2>/dev/null || true
+
+    cat <<'SYSCTL_EOF' | sudo tee /etc/sysctl.d/99-stream-optimization.conf > /dev/null 2>&1 || cat <<'SYSCTL_EOF' | tee /etc/sysctl.d/99-stream-optimization.conf > /dev/null 2>&1
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
+net.ipv4.tcp_rmem = 4096 87380 16777216
+net.ipv4.tcp_wmem = 4096 65536 16777216
+net.ipv4.tcp_notsent_lowat = 16384
+SYSCTL_EOF
+
+    sudo sysctl -p /etc/sysctl.d/99-stream-optimization.conf 2>/dev/null || sysctl -p /etc/sysctl.d/99-stream-optimization.conf 2>/dev/null || true
+    echo -e "${GREEN}Google BBR & TCP buffer optimizations applied successfully.${NC}"
+}
+
 configure_optimizations() {
     clear
     echo -e "${GREEN}=== Optimizations ===${NC}"
@@ -1032,6 +1050,9 @@ configure_optimizations() {
         echo -e "${GREEN}Chunk size updated.${NC}"
         sleep 1
     fi
+
+    enable_bbr_and_tcp_optimizations
+    sleep 2
 }
 
 install_docker() {
@@ -1167,6 +1188,8 @@ build_and_run() {
         echo -e "${YELLOW}Downloading default BRB video...${NC}"
         curl -L "$BRB_VIDEO_URL" -o ./data/brb_video.mp4 && echo -e "${GREEN}Downloaded default BRB video.${NC}" || echo -e "${RED}Failed to download BRB video.${NC}"
     fi
+
+    enable_bbr_and_tcp_optimizations
 
     echo -e "${GREEN}Building Docker Image...${NC}"
     docker build -t cookie-rtmps .

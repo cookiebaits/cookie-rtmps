@@ -1,4 +1,4 @@
-FROM buildpack-deps:trixie
+FROM buildpack-deps:bookworm
 
 # Versions of Nginx and nginx-rtmp-module to use
 ENV NGINX_VERSION=nginx-1.30.3
@@ -62,6 +62,8 @@ COPY update_titles.py /app/update_titles.py
 COPY tiktok_pusher.py /app/tiktok_pusher.py
 COPY tiktok_search.py /app/tiktok_search.py
 COPY noalbs /app/noalbs
+COPY test_noalbs.py /app/test_noalbs.py
+COPY test_validator.py /app/test_validator.py
 
 # Config Stunnel
 RUN mkdir -p  /etc/stunnel/conf.d
