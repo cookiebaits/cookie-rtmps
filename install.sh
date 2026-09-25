@@ -1136,14 +1136,24 @@ build_and_run() {
     # Execute network optimizations
     enable_bbr_and_tcp_optimizations
 
-    echo -e "${YELLOW}Stopping and removing any old rtmps instances...${NC}"
-    OLD_CONTAINERS=$(docker ps -a --format '{{.ID}} {{.Names}}' | grep -i rtmps | awk '{print $1}')
+    echo -e "${YELLOW}Stopping and removing old cookie-rtmps containers, related Docker volumes, and Docker images...${NC}"
+    OLD_CONTAINERS=$(docker ps -a --format '{{.ID}} {{.Names}}' | grep -iE 'cookie-rtmps|rtmps' | awk '{print $1}')
     if [ ! -z "$OLD_CONTAINERS" ]; then
+        echo -e "${YELLOW}Stopping existing containers...${NC}"
         docker stop $OLD_CONTAINERS 2>/dev/null || true
-        docker rm $OLD_CONTAINERS 2>/dev/null || true
+        echo -e "${YELLOW}Removing existing containers and associated volumes...${NC}"
+        docker rm -v -f $OLD_CONTAINERS 2>/dev/null || true
     fi
-    OLD_IMAGES=$(docker images --format '{{.ID}} {{.Repository}}' | grep -i rtmps | awk '{print $1}')
+
+    OLD_VOLUMES=$(docker volume ls -q | grep -iE 'cookie-rtmps|rtmps')
+    if [ ! -z "$OLD_VOLUMES" ]; then
+        echo -e "${YELLOW}Removing matching Docker volumes...${NC}"
+        docker volume rm -f $OLD_VOLUMES 2>/dev/null || true
+    fi
+
+    OLD_IMAGES=$(docker images --format '{{.ID}} {{.Repository}}' | grep -iE 'cookie-rtmps|rtmps' | awk '{print $1}')
     if [ ! -z "$OLD_IMAGES" ]; then
+        echo -e "${YELLOW}Removing matching Docker images...${NC}"
         docker rmi -f $OLD_IMAGES 2>/dev/null || true
     fi
 
@@ -1242,7 +1252,7 @@ build_and_run() {
 
     echo -e "${GREEN}Stopping any existing container...${NC}"
     docker stop cookie-rtmps 2>/dev/null || true
-    docker rm cookie-rtmps 2>/dev/null || true
+    docker rm -v -f cookie-rtmps 2>/dev/null || true
 
     echo -e "${GREEN}Starting container...${NC}"
 
@@ -1383,9 +1393,23 @@ stop_and_uninstall() {
         return
     fi
     echo -e "${YELLOW}Stopping services and uninstalling...${NC}"
-    docker stop cookie-rtmps 2>/dev/null && echo -e "${GREEN}Container stopped.${NC}" || echo -e "${RED}Container not running.${NC}"
-    docker rm cookie-rtmps 2>/dev/null && echo -e "${GREEN}Container removed, ports unbound.${NC}" || true
-    docker rmi cookie-rtmps 2>/dev/null && echo -e "${GREEN}Image removed. CookieRTMPS has been completely removed from Docker.${NC}" || true
+    OLD_CONTAINERS=$(docker ps -a --format '{{.ID}} {{.Names}}' | grep -iE 'cookie-rtmps|rtmps' | awk '{print $1}')
+    if [ ! -z "$OLD_CONTAINERS" ]; then
+        docker stop $OLD_CONTAINERS 2>/dev/null || true
+        docker rm -v -f $OLD_CONTAINERS 2>/dev/null || true
+        echo -e "${GREEN}Containers and volumes removed.${NC}"
+    fi
+
+    OLD_VOLUMES=$(docker volume ls -q | grep -iE 'cookie-rtmps|rtmps')
+    if [ ! -z "$OLD_VOLUMES" ]; then
+        docker volume rm -f $OLD_VOLUMES 2>/dev/null || true
+    fi
+
+    OLD_IMAGES=$(docker images --format '{{.ID}} {{.Repository}}' | grep -iE 'cookie-rtmps|rtmps' | awk '{print $1}')
+    if [ ! -z "$OLD_IMAGES" ]; then
+        docker rmi -f $OLD_IMAGES 2>/dev/null || true
+        echo -e "${GREEN}Images removed. CookieRTMPS has been completely removed from Docker.${NC}"
+    fi
     sleep 3
 }
 
