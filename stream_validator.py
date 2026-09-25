@@ -5,6 +5,7 @@ from urllib.parse import parse_qs
 import threading
 import subprocess
 from datetime import datetime
+import ipaddress
 
 app = Flask(__name__)
 logging.basicConfig(
@@ -50,6 +51,47 @@ else:
 
 if ACCEPTED_IP:
     app.logger.info(f"IP Whitelist active: {ACCEPTED_IP}")
+
+def is_ip_allowed(client_ip, whitelist):
+    if not whitelist:
+        return True
+    if not client_ip:
+        return False
+
+    ip_str = client_ip.strip()
+    if ip_str.startswith('['):
+        if ']' in ip_str:
+            clean_ip = ip_str[1:ip_str.index(']')]
+        else:
+            clean_ip = ip_str
+    elif '.' in ip_str and ':' in ip_str:
+        clean_ip = ip_str.split(':')[0]
+    else:
+        clean_ip = ip_str
+
+    try:
+        ip_obj = ipaddress.ip_address(clean_ip)
+    except ValueError:
+        return False
+
+    if ip_obj.is_loopback:
+        return True
+
+    entries = [e.strip() for e in whitelist.split(',') if e.strip()]
+    for entry in entries:
+        try:
+            if '/' in entry:
+                net = ipaddress.ip_network(entry, strict=False)
+                if ip_obj in net:
+                    return True
+            else:
+                target_ip = ipaddress.ip_address(entry)
+                if ip_obj == target_ip:
+                    return True
+        except ValueError:
+            continue
+
+    return False
 
 def get_episode_count():
     try:
@@ -105,9 +147,15 @@ def validate():
         client_ip = parsed_data.get('addr', [request.remote_addr])[0]
 
     # IP Whitelist Check
-    if ACCEPTED_IP and client_ip != ACCEPTED_IP:
+    current_whitelist = ACCEPTED_IP if ACCEPTED_IP is not None else os.getenv('ACCEPTED_IP', '')
+    if not is_ip_allowed(client_ip, current_whitelist):
         app.logger.warning(f"REJECTED IP: {client_ip}")
         return Response('IP not whitelisted', status=403)
+
+    # Cloud BRB stream key bypass
+    if stream_key_attempt.startswith('cloud_brb'):
+        app.logger.info(f"ACCEPTED cloud_brb stream from {client_ip}")
+        return Response('OK', status=200)
 
     # Key Check
     if not VALID_KEYS:

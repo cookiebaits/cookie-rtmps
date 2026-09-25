@@ -1,4 +1,4 @@
-FROM buildpack-deps:trixie
+FROM buildpack-deps:bookworm
 
 # Versions of Nginx and nginx-rtmp-module to use
 ENV NGINX_VERSION=nginx-1.30.3

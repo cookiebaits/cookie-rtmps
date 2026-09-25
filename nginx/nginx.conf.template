@@ -120,7 +120,10 @@ rtmp {
         listen 19352;
         chunk_size ${CHUNK_SIZE};
 
-        # Stability and Security Enhancements
+        # Stability, Throughput, and Security Enhancements
+        max_message 10M;
+        out_queue 4096;
+        out_cork 8;
         ping 30s;
         ping_timeout 10s;
         drop_idle_publisher 10s;

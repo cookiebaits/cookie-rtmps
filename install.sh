@@ -1010,7 +1010,15 @@ configure_noalbs() {
                     save_config
                     mkdir -p ./data
                     echo -e "${YELLOW}Downloading BRB video...${NC}"
-                    curl -L "$BRB_VIDEO_URL" -o ./data/brb_video.mp4 && echo -e "${GREEN}Downloaded.${NC}" || echo -e "${RED}Download failed.${NC}"
+                    if curl -L "$BRB_VIDEO_URL" -o ./data/brb_video.mp4; then
+                        echo -e "${GREEN}Downloaded.${NC}"
+                        if command -v ffmpeg &> /dev/null; then
+                            echo -e "${YELLOW}Optimizing MP4 for RTMP streaming...${NC}"
+                            ffmpeg -y -i ./data/brb_video.mp4 -c:v libx264 -pix_fmt yuv420p -preset fast -g 60 -sc_threshold 0 -c:a aac -ac 2 -ar 48000 ./data/brb_video_rtmp.mp4 >/dev/null 2>&1 && mv ./data/brb_video_rtmp.mp4 ./data/brb_video.mp4
+                        fi
+                    else
+                        echo -e "${RED}Download failed.${NC}"
+                    fi
                     sleep 2
                 fi
                 ;;
@@ -1241,6 +1249,8 @@ build_and_run() {
         -e LOW_BITRATE="$LOW_BITRATE" \
         -e RESTORE_BITRATE="$RESTORE_BITRATE" \
         -e CLOUD_BRB="$CLOUD_BRB" \
+        -e BRB_VIDEO_URL="$BRB_VIDEO_URL" \
+        -e CLOUD_BRB_TIMEOUT="${CLOUD_BRB_TIMEOUT:-300}" \
         -v "$(pwd)/data:/app/data" \
         cookie-rtmps
 
