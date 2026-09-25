@@ -154,6 +154,31 @@ class TestNoalbsComprehensive(unittest.TestCase):
         noalbs.start_cloud_brb()
         mock_popen.assert_not_called()
 
+    def test_default_brb_video_url_when_undefined_or_empty(self):
+        default_target = "https://filedn.com/lfh40bKbFfD5um9HDFNrJFR/brb.mp4"
+
+        for val in ["", "none", "disable", "clear"]:
+            os.environ["BRB_VIDEO_URL"] = val
+            noalbs = Noalbs()
+            self.assertEqual(noalbs.brb_video_url, default_target)
+
+    @patch("noalbs.noalbs.os.path.exists", return_value=False)
+    @patch("requests.get")
+    def test_download_brb_video_uses_default_url(self, mock_get, mock_exists):
+        os.environ["BRB_VIDEO_URL"] = ""
+        noalbs = Noalbs()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.iter_content.return_value = [b"video_bytes"]
+        mock_get.return_value = mock_resp
+
+        with patch("builtins.open", unittest.mock.mock_open()):
+            with patch.object(noalbs, "ensure_rtmp_compatible_mp4", return_value=True):
+                success = noalbs.download_brb_video_if_missing()
+                self.assertTrue(success)
+                mock_get.assert_called_once()
+                self.assertEqual(mock_get.call_args[0][0], "https://filedn.com/lfh40bKbFfD5um9HDFNrJFR/brb.mp4")
+
     @patch("noalbs.noalbs.os.path.exists", return_value=True)
     @patch("subprocess.Popen")
     def test_stop_cloud_brb(self, mock_popen, mock_exists):

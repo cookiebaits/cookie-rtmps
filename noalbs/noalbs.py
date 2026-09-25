@@ -10,6 +10,8 @@ import signal
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("NOALBS")
 
+DEFAULT_BRB_URL = "https://filedn.com/lfh40bKbFfD5um9HDFNrJFR/brb.mp4"
+
 class Noalbs:
     def __init__(self):
         self.enabled = os.getenv("NOALBS_ENABLED", "true").lower() == "true"
@@ -25,7 +27,11 @@ class Noalbs:
 
         self.cloud_brb_enabled = os.getenv("CLOUD_BRB", "true").lower() == "true"
         self.brb_video_path = os.getenv("BRB_VIDEO_PATH", "/app/data/brb_video.mp4")
-        self.brb_video_url = os.getenv("BRB_VIDEO_URL", "")
+        raw_video_url = os.getenv("BRB_VIDEO_URL", "").strip()
+        if not raw_video_url or raw_video_url.lower() in ["none", "disable", "clear"]:
+            self.brb_video_url = DEFAULT_BRB_URL
+        else:
+            self.brb_video_url = raw_video_url
         self.cloud_brb_timeout = int(os.getenv("CLOUD_BRB_TIMEOUT", 300))
         self.cloud_process = None
         self.cloud_brb_start_time = None
@@ -107,9 +113,13 @@ class Noalbs:
 
     def download_brb_video_if_missing(self):
         if os.path.exists(self.brb_video_path):
-            return True
+            try:
+                if os.path.getsize(self.brb_video_path) > 0:
+                    return True
+            except Exception:
+                return True
 
-        download_url = self.brb_video_url or "https://filedn.com/lfh40bKbFfD5um9HDFNrJFR/brb.mp4"
+        download_url = self.brb_video_url if self.brb_video_url else DEFAULT_BRB_URL
         logger.info(f"BRB video missing at {self.brb_video_path}. Attempting download from {download_url}...")
         try:
             os.makedirs(os.path.dirname(self.brb_video_path), exist_ok=True)

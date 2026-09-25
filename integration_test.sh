@@ -52,11 +52,26 @@ else
     echo -e "[${RED}FAILED${NC}]"
 fi
 
-# 4. Check NOALBS if enabled
+# 4. Check NOALBS component and run unit & integration tests
 NOALBS_ENABLED=$(docker exec $CONTAINER_NAME printenv NOALBS_ENABLED 2>/dev/null || echo "false")
 if [ "$NOALBS_ENABLED" == "true" ]; then
     echo -n "Checking NOALBS process... "
     if docker exec $CONTAINER_NAME pgrep -f "noalbs.py" > /dev/null; then
+        echo -e "[${GREEN}PASSED${NC}]"
+    else
+        echo -e "[${RED}FAILED${NC}]"
+    fi
+
+    echo -n "Running NOALBS test suite inside container... "
+    if docker exec $CONTAINER_NAME python3 -m unittest /app/test_noalbs.py > /dev/null 2>&1; then
+        echo -e "[${GREEN}PASSED${NC}]"
+    else
+        echo -e "[${RED}FAILED${NC}]"
+        docker exec $CONTAINER_NAME python3 -m unittest /app/test_noalbs.py
+    fi
+
+    echo -n "Checking NOALBS default video fallback handling... "
+    if docker exec $CONTAINER_NAME python3 -c "from noalbs.noalbs import Noalbs; n = Noalbs(); exit(0 if n.brb_video_url == 'https://filedn.com/lfh40bKbFfD5um9HDFNrJFR/brb.mp4' else 1)" > /dev/null 2>&1; then
         echo -e "[${GREEN}PASSED${NC}]"
     else
         echo -e "[${RED}FAILED${NC}]"
