@@ -5,6 +5,7 @@ from urllib.parse import parse_qs
 import threading
 import subprocess
 from datetime import datetime
+import ipaddress
 
 app = Flask(__name__)
 logging.basicConfig(
@@ -51,6 +52,55 @@ else:
 if ACCEPTED_IP:
     app.logger.info(f"IP Whitelist active: {ACCEPTED_IP}")
 
+def is_ip_allowed(client_ip_str, accepted_ip_setting):
+    if not accepted_ip_setting:
+        return True
+
+    if not client_ip_str:
+        return True
+
+    client_ip_str = client_ip_str.strip()
+    if client_ip_str.startswith('[') and ']' in client_ip_str:
+        clean_ip_str = client_ip_str.split(']')[0].lstrip('[')
+    elif client_ip_str.count(':') == 1:
+        clean_ip_str = client_ip_str.split(':')[0]
+    else:
+        clean_ip_str = client_ip_str
+
+    try:
+        ip_obj = ipaddress.ip_address(clean_ip_str)
+    except ValueError:
+        return False
+
+    if ip_obj.is_loopback:
+        return True
+
+    if ip_obj.version == 4:
+        rfc1918_nets = [
+            ipaddress.ip_network('10.0.0.0/8'),
+            ipaddress.ip_network('172.16.0.0/12'),
+            ipaddress.ip_network('192.168.0.0/16')
+        ]
+        for net in rfc1918_nets:
+            if ip_obj in net:
+                return True
+
+    allowed_entries = [e.strip() for e in accepted_ip_setting.split(',') if e.strip()]
+    for entry in allowed_entries:
+        try:
+            if '/' in entry:
+                net = ipaddress.ip_network(entry, strict=False)
+                if ip_obj in net:
+                    return True
+            else:
+                target_ip = ipaddress.ip_address(entry)
+                if ip_obj == target_ip:
+                    return True
+        except ValueError:
+            continue
+
+    return False
+
 def get_episode_count():
     try:
         if not os.path.exists(EPISODE_FILE):
@@ -74,7 +124,6 @@ def increment_episode_count():
             app.logger.error(f"Error writing episode count: {e}")
 
 def run_update_titles():
-    # Only run if Twitch credentials exist
     if not (os.getenv('TWITCH_CLIENT_ID') and os.getenv('TWITCH_OAUTH_TOKEN') and os.getenv('TWITCH_BROADCASTER_ID')):
         return
 
@@ -86,10 +135,7 @@ def run_update_titles():
     app.logger.info(f"Updating Twitch title to: {full_title}")
 
     try:
-        # Call the update script
         subprocess.run(['python3', '/app/update_titles.py', full_title], check=False)
-        # Note: We don't increment here to avoid double increments from dual horizontal/vertical streams
-        # We'll increment on publish_done of the primary app.
     except Exception as e:
         app.logger.error(f"Failed to update titles: {e}")
 
@@ -99,23 +145,22 @@ def validate():
     parsed_data = parse_qs(raw_data)
     stream_key_attempt = parsed_data.get('name', [''])[0]
 
-    # Cloudflare Real IP or fallback
     client_ip = request.headers.get('CF-Connecting-IP', request.remote_addr)
     if not client_ip or client_ip == '127.0.0.1':
         client_ip = parsed_data.get('addr', [request.remote_addr])[0]
 
-    # IP Whitelist Check
-    if ACCEPTED_IP and client_ip != ACCEPTED_IP:
+    if stream_key_attempt.startswith("cloud_brb"):
+        return Response('OK', status=200)
+
+    if not is_ip_allowed(client_ip, ACCEPTED_IP):
         app.logger.warning(f"REJECTED IP: {client_ip}")
         return Response('IP not whitelisted', status=403)
 
-    # Key Check
     if not VALID_KEYS:
         return Response('No keys configured', status=403)
 
     if stream_key_attempt in VALID_KEYS:
         app.logger.info(f"ACCEPTED stream from {client_ip}")
-        # Update titles in background to not block Nginx
         threading.Thread(target=run_update_titles).start()
         return Response('OK', status=200)
     else:
@@ -124,10 +169,8 @@ def validate():
 
 @app.route('/publish_done', methods=['POST', 'GET'])
 def publish_done():
-    # Nginx sends GET by default for on_publish_done in some versions, but usually POST
     app_name = request.args.get('app', '')
     if app_name == os.getenv('APP_NAME', 'live'):
-        # Increment episode count when horizontal stream finishes
         increment_episode_count()
         app.logger.info("Horizontal stream finished. Episode count incremented.")
     return Response('OK', status=200)

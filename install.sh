@@ -79,6 +79,7 @@ OBS_SCENE_BRB="BRB"
 LOW_BITRATE="1000"
 RESTORE_BITRATE="1500"
 CLOUD_BRB="true"
+CLOUD_BRB_TIMEOUT="300"
 BRB_VIDEO_URL=""
 
 CONFIG_FILE="rtmp_config.env"
@@ -148,6 +149,7 @@ OBS_SCENE_BRB="$OBS_SCENE_BRB"
 LOW_BITRATE="$LOW_BITRATE"
 RESTORE_BITRATE="$RESTORE_BITRATE"
 CLOUD_BRB="$CLOUD_BRB"
+CLOUD_BRB_TIMEOUT="$CLOUD_BRB_TIMEOUT"
 BRB_VIDEO_URL="$BRB_VIDEO_URL"
 PORT_RTMP="$PORT_RTMP"
 PORT_HTTP="$PORT_HTTP"
@@ -182,14 +184,12 @@ get_alternative_url() {
     case $platform in
         "youtube")
             if [[ "$current_url" == *"x.rtmp.youtube.com"* ]] || [[ "$current_url" == *"127.0.0.1:19355"* ]]; then
-                # It is a primary URL, return the corresponding backup URL
                 if [[ "$current_url" == *"127.0.0.1"* ]]; then
                     echo "rtmp://127.0.0.1:19357/live2?backup=1"
                 else
                     echo "rtmp://b.rtmp.youtube.com/live2?backup=1"
                 fi
             else
-                # It is a backup URL or something else, return the corresponding primary URL
                 if [[ "$current_url" == *"127.0.0.1"* ]]; then
                     echo "rtmp://127.0.0.1:19355/live2/"
                 else
@@ -198,20 +198,16 @@ get_alternative_url() {
             fi
             ;;
         "twitch")
-            # If it is using the global ingest, switch to US East (Ashburn) as a reliable alternative
             if [[ "$current_url" == *"ingest.global"* ]]; then
                 echo "rtmp://use10.contribute.live-video.net/app/"
             else
-                # If it is using a regional ingest, switch to the global ingest
                 echo "rtmp://ingest.global-contribute.live-video.net/app/"
             fi
             ;;
         "kick")
-            # If it is using standard/secure, switch to the South Africa relay as an alternative
             if [[ "$current_url" == *"live.kick.com"* ]] || [[ "$current_url" == *"127.0.0.1:19356"* ]]; then
                 echo "rtmp://kick.cisp.co.za/live"
             else
-                # Otherwise switch to the secure global endpoint
                 echo "rtmp://127.0.0.1:19356/kick/"
             fi
             ;;
@@ -219,6 +215,57 @@ get_alternative_url() {
             echo "$current_url"
             ;;
     esac
+}
+
+ensure_brb_video_transcoded() {
+    local target_url=$1
+    mkdir -p ./data
+    local raw_file="./data/brb_temp_raw.mp4"
+    local final_file="./data/brb_video.mp4"
+
+    echo -e "${YELLOW}Downloading BRB video from $target_url...${NC}"
+    if curl -L "$target_url" -o "$raw_file"; then
+        echo -e "${GREEN}Download successful.${NC}"
+        if command -v ffmpeg &> /dev/null; then
+            echo -e "${YELLOW}Verifying and transcoding BRB video for FFmpeg AAC/H.264 RTMP compatibility...${NC}"
+            ffmpeg -y -i "$raw_file" -c:v libx264 -pix_fmt yuv420p -g 60 -c:a aac -ar 48000 -ac 2 "$final_file" >/dev/null 2>&1
+            if [ $? -eq 0 ]; then
+                echo -e "${GREEN}BRB video successfully transcoded and verified.${NC}"
+                rm -f "$raw_file"
+                return 0
+            fi
+        fi
+        mv "$raw_file" "$final_file"
+        echo -e "${GREEN}BRB video saved.${NC}"
+        return 0
+    else
+        echo -e "${RED}Failed to download BRB video.${NC}"
+        return 1
+    fi
+}
+
+enable_bbr_and_tcp_optimizations() {
+    echo -e "${YELLOW}Configuring Google BBR & TCP Buffer Optimizations...${NC}"
+    if command -v modprobe &> /dev/null; then
+        sudo modprobe tcp_bbr 2>/dev/null || true
+    fi
+
+    SYSCTL_CONF="/etc/sysctl.d/99-stream-optimization.conf"
+    SYSCTL_CONTENT="net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
+net.ipv4.tcp_rmem = 4096 87380 16777216
+net.ipv4.tcp_wmem = 4096 65536 16777216
+net.ipv4.tcp_notsent_lowat = 16384"
+
+    if [ -w "/etc/sysctl.d" ] || sudo -n true 2>/dev/null; then
+        echo "$SYSCTL_CONTENT" | sudo tee "$SYSCTL_CONF" >/dev/null 2>&1 || true
+        sudo sysctl --system >/dev/null 2>&1 || sudo sysctl -p "$SYSCTL_CONF" >/dev/null 2>&1 || true
+        echo -e "${GREEN}Google BBR & TCP Network Optimizations Applied.${NC}"
+    else
+        echo -e "${YELLOW}Skipped writing $SYSCTL_CONF (insufficient privileges).${NC}"
+    fi
 }
 
 configure_keys() {
@@ -702,10 +749,7 @@ configure_vertical_keys() {
 configure_obs() {
     clear
     echo -e "${GREEN}=== OBS Configuration ===${NC}"
-    # Determine the public IP if possible, or fallback to placeholder
     SERVER_IP=$(curl -4 -s ifconfig.me || echo "<your_server_ip>")
-
-    # Use Domain if set, otherwise IP
     DISPLAY_HOST=${SERVER_DOMAIN:-$SERVER_IP}
 
     echo -e "To stream to this server from OBS or another encoder:"
@@ -737,7 +781,6 @@ configure_obs() {
     echo -e "(Leave blank to keep current):"
     read -r app_input
     if [ ! -z "$app_input" ]; then
-        # Basic sanitization: remove everything except alphanumeric
         app_input=$(echo "$app_input" | sed 's/[^a-zA-Z0-9]//g')
         if [ ! -z "$app_input" ]; then
             APP_NAME="$app_input"
@@ -762,7 +805,6 @@ configure_domain() {
         SERVER_DOMAIN=""
         echo -e "${GREEN}Domain disabled, using IP.${NC}"
     elif [ ! -z "$dom_input" ]; then
-        # Basic sanitization for domain
         dom_input=$(echo "$dom_input" | sed 's/[^a-zA-Z0-9.-]//g')
         if [ ! -z "$dom_input" ]; then
             SERVER_DOMAIN="$dom_input"
@@ -953,7 +995,8 @@ configure_noalbs() {
         echo "8) Restore Bitrate Threshold (Current: $RESTORE_BITRATE kbps)"
         echo "9) Toggle Cloud BRB (Currently: $CLOUD_BRB)"
         echo "10) Configure BRB Video URL (Current: ${BRB_VIDEO_URL:-(None)})"
-        echo "11) Back to Main Menu"
+        echo "11) Disconnection Video Protection Duration (Current: ${CLOUD_BRB_TIMEOUT}s)"
+        echo "12) Back to Main Menu"
         echo -e "Select an option: \c"
         read -r noalbs_opt
 
@@ -1008,13 +1051,21 @@ configure_noalbs() {
                 if [ ! -z "$input" ]; then
                     BRB_VIDEO_URL="$input"
                     save_config
-                    mkdir -p ./data
-                    echo -e "${YELLOW}Downloading BRB video...${NC}"
-                    curl -L "$BRB_VIDEO_URL" -o ./data/brb_video.mp4 && echo -e "${GREEN}Downloaded.${NC}" || echo -e "${RED}Download failed.${NC}"
+                    ensure_brb_video_transcoded "$BRB_VIDEO_URL"
                     sleep 2
                 fi
                 ;;
-            11) break ;;
+            11)
+                echo -e "Enter Disconnection Video Protection Duration in seconds (Default: 300):"
+                read -r input
+                if [ ! -z "$input" ]; then
+                    CLOUD_BRB_TIMEOUT="$input"
+                    save_config
+                    echo -e "${GREEN}Protection duration updated to ${CLOUD_BRB_TIMEOUT}s.${NC}"
+                    sleep 1
+                fi
+                ;;
+            12) break ;;
             *) echo -e "${RED}Invalid option${NC}" ; sleep 1 ;;
         esac
     done
@@ -1032,13 +1083,14 @@ configure_optimizations() {
         echo -e "${GREEN}Chunk size updated.${NC}"
         sleep 1
     fi
+    enable_bbr_and_tcp_optimizations
+    sleep 2
 }
 
 install_docker() {
     echo -e "${GREEN}Checking for Docker...${NC}"
     if ! command -v docker &> /dev/null; then
         echo -e "${YELLOW}Docker not found. Installing...${NC}"
-        # Basic docker install via official script
         curl -4 -fsSL https://get.docker.com -o get-docker.sh
         sudo sh get-docker.sh
         sudo systemctl start docker
@@ -1058,7 +1110,7 @@ check_port() {
     elif command -v netstat &> /dev/null; then
         netstat -tuln | grep -q ":$port "
     else
-        return 1 # Cannot check
+        return 1
     fi
 }
 
@@ -1068,6 +1120,8 @@ build_and_run() {
         sleep 2
         return
     fi
+
+    enable_bbr_and_tcp_optimizations
 
     echo -e "${YELLOW}Stopping and removing any old rtmps instances...${NC}"
     OLD_CONTAINERS=$(docker ps -a --format '{{.ID}} {{.Names}}' | grep -i rtmps | awk '{print $1}')
@@ -1109,8 +1163,6 @@ build_and_run() {
         echo -e "${GREEN}No port conflicts detected.${NC}"
     fi
 
-    # Auto-fill vertical from horizontal if horizontal is set but vertical is not (YouTube, Twitch, TikTok, Kick)
-    # Automatically chooses an alternative ingest server to avoid conflicts
     if [ ! -z "$YOUTUBE_KEY" ] && [ -z "$V_YOUTUBE_KEY" ]; then
         V_YOUTUBE_KEY="$YOUTUBE_KEY"
         V_YOUTUBE_URL=$(get_alternative_url "youtube" "$YOUTUBE_URL")
@@ -1124,7 +1176,6 @@ build_and_run() {
         V_KICK_URL=$(get_alternative_url "kick" "$KICK_URL")
     fi
 
-    # Hard Enforcement: Always ensure horizontal and vertical ingest URLs are different for YT, Twitch, Kick
     if [ ! -z "$YOUTUBE_KEY" ] && [ "$YOUTUBE_URL" == "$V_YOUTUBE_URL" ]; then
         V_YOUTUBE_URL=$(get_alternative_url "youtube" "$V_YOUTUBE_URL")
     fi
@@ -1140,7 +1191,6 @@ build_and_run() {
         V_TIKTOK_URL="$TIKTOK_URL"
     fi
 
-    # Check if any keys are set
     ANY_KEY_SET=0
     for key in "$YOUTUBE_KEY" "$FACEBOOK_KEY" "$INSTAGRAM_KEY" "$TIKTOK_KEY" "$TWITCH_KEY" "$KICK_KEY" "$X_KEY" "$TROVO_KEY" "$RTMP1_KEY" \
                "$V_YOUTUBE_KEY" "$V_TWITCH_KEY" "$V_KICK_KEY" "$V_TIKTOK_KEY" "$V_FACEBOOK_KEY" "$V_INSTAGRAM_KEY" "$V_X_KEY" "$V_TROVO_KEY" "$V_RTMP1_KEY"; do
@@ -1162,10 +1212,7 @@ build_and_run() {
         echo -e "${YELLOW}Cloud BRB is enabled but BRB Video URL is empty. Setting to default...${NC}"
         BRB_VIDEO_URL="https://filedn.com/lfh40bKbFfD5um9HDFNrJFR/brb.mp4"
         save_config
-        mkdir -p ./data
-        rm -f ./data/brb_video.mp4
-        echo -e "${YELLOW}Downloading default BRB video...${NC}"
-        curl -L "$BRB_VIDEO_URL" -o ./data/brb_video.mp4 && echo -e "${GREEN}Downloaded default BRB video.${NC}" || echo -e "${RED}Failed to download BRB video.${NC}"
+        ensure_brb_video_transcoded "$BRB_VIDEO_URL"
     fi
 
     echo -e "${GREEN}Building Docker Image...${NC}"
@@ -1177,13 +1224,11 @@ build_and_run() {
 
     echo -e "${GREEN}Starting container...${NC}"
 
-    # Port mapping logic: Map HTTP/HTTPS only if domain is set
     PORT_MAPS="-p ${PORT_RTMP}:1935"
     if [ ! -z "$SERVER_DOMAIN" ]; then
         PORT_MAPS="$PORT_MAPS -p ${PORT_HTTP}:80"
     fi
 
-    # Start the container
     docker run -d --name cookie-rtmps \
         $PORT_MAPS \
         --restart unless-stopped \
@@ -1241,6 +1286,7 @@ build_and_run() {
         -e LOW_BITRATE="$LOW_BITRATE" \
         -e RESTORE_BITRATE="$RESTORE_BITRATE" \
         -e CLOUD_BRB="$CLOUD_BRB" \
+        -e CLOUD_BRB_TIMEOUT="$CLOUD_BRB_TIMEOUT" \
         -v "$(pwd)/data:/app/data" \
         cookie-rtmps
 
@@ -1256,7 +1302,6 @@ build_and_run() {
         docker restart cookie-rtmps
         sleep 3
 
-        # Run Integration Tests
         if [ -f "./integration_test.sh" ]; then
             chmod +x ./integration_test.sh
             ./integration_test.sh
@@ -1276,7 +1321,6 @@ view_logs() {
     fi
 
     echo -e "${YELLOW}Showing logs for cookie-rtmps... (Press Ctrl+C to exit log view)${NC}"
-    # Use a subshell and trap INT to ensure script doesn't exit on Ctrl+C
     (trap 'exit 0' INT; docker logs -f cookie-rtmps)
 
     while true; do
@@ -1290,9 +1334,7 @@ view_logs() {
             1) break ;;
             2)
                 echo -e "${YELLOW}Clearing logs...${NC}"
-                # Truncate internal logs
                 docker exec cookie-rtmps sh -c 'truncate -s 0 /var/log/nginx/access.log /var/log/nginx/error.log' 2>/dev/null || true
-                # Truncate Docker's own log file for the container
                 LOG_PATH=$(docker inspect --format='{{.LogPath}}' cookie-rtmps 2>/dev/null)
                 if [ ! -z "$LOG_PATH" ]; then
                     sudo truncate -s 0 "$LOG_PATH" 2>/dev/null || truncate -s 0 "$LOG_PATH" 2>/dev/null || echo -e "${RED}Failed to truncate Docker log file. You may need sudo.${NC}"
@@ -1318,7 +1360,6 @@ stop_and_uninstall() {
     sleep 3
 }
 
-# Cache Server IP for UI Performance
 SERVER_IP=$(curl -4 -s ifconfig.me || echo "<your_server_ip>")
 
 while true; do
@@ -1339,15 +1380,15 @@ while true; do
     echo "4) Configure OBS Setup & Security Key"
     echo "5) Configure IP Whitelist (Optional)"
     echo "6) Configure Combined Chat (Optional)"
-        echo "7) Configure Stream Titles & Twitch API (Optional)"
-        echo "8) Configure Domain / Reverse Proxy (Optional)"
-        echo "9) Configure Optimizations (Chunk Size)"
-        echo "10) Configure NOALBS Scene Switcher"
-        echo "11) Build & Start Server"
-        echo "12) Run Integration Tests"
-        echo "13) Stop Server & Uninstall"
-        echo "14) View Logs"
-        echo "15) Quit"
+    echo "7) Configure Stream Titles & Twitch API (Optional)"
+    echo "8) Configure Domain / Reverse Proxy (Optional)"
+    echo "9) Configure Optimizations (Chunk Size & Google BBR)"
+    echo "10) Configure NOALBS Scene Switcher"
+    echo "11) Build & Start Server"
+    echo "12) Run Integration Tests"
+    echo "13) Stop Server & Uninstall"
+    echo "14) View Logs"
+    echo "15) Quit"
     echo -e "Select an option: \c"
     read -r option
 

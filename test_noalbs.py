@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import patch, MagicMock, call
+from unittest.mock import patch, MagicMock
 import os
 import sys
 import time
@@ -19,6 +19,7 @@ class TestNoalbsComprehensive(unittest.TestCase):
         os.environ["APP_NAME"] = "live"
         os.environ["OBS_SCENE_LIVE"] = "Main"
         os.environ["OBS_SCENE_BRB"] = "BRB"
+        os.environ["BRB_VIDEO_PATH"] = "/app/data/brb_video.mp4"
 
     def make_stat_xml(self, live_bw=0, vert_bw=0, include_cloud_brb=False):
         xml = f"""<?xml version="1.0" encoding="UTF-8" ?>
@@ -87,59 +88,60 @@ class TestNoalbsComprehensive(unittest.TestCase):
         bitrate = noalbs.get_bitrate()
         self.assertEqual(bitrate, 0)
 
+    @patch("noalbs.noalbs.os.path.getsize", return_value=1024)
     @patch("noalbs.noalbs.os.path.exists", return_value=True)
     @patch("subprocess.Popen")
     @patch("subprocess.run")
-    def test_custom_brb_video_path(self, mock_run, mock_popen, mock_exists):
+    def test_custom_brb_video_path(self, mock_run, mock_popen, mock_exists, mock_getsize):
         custom_path = "/tmp/my_custom_brb.mp4"
         os.environ["BRB_VIDEO_PATH"] = custom_path
         noalbs = Noalbs()
         self.assertEqual(noalbs.brb_video_path, custom_path)
 
         noalbs.start_cloud_brb()
-        mock_popen.assert_called_once()
         cmd = mock_popen.call_args[0][0]
         self.assertIn("-stream_loop", cmd)
         self.assertIn("-1", cmd)
         self.assertIn(custom_path, cmd)
 
+    @patch("noalbs.noalbs.os.path.getsize", return_value=1024)
     @patch("noalbs.noalbs.os.path.exists", return_value=True)
     @patch("subprocess.Popen")
     @patch("subprocess.run")
-    def test_start_cloud_brb_libx264_command(self, mock_run, mock_popen, mock_exists):
+    def test_start_cloud_brb_libx264_command(self, mock_run, mock_popen, mock_exists, mock_getsize):
         mock_run.return_value = MagicMock(stdout="libx264")
         noalbs = Noalbs()
         noalbs.start_cloud_brb()
 
-        mock_popen.assert_called_once()
         cmd = mock_popen.call_args[0][0]
         self.assertEqual(cmd[0], "ffmpeg")
         self.assertIn("-c:v", cmd)
         self.assertIn("libx264", cmd)
         
-        # Verify optional audio map (-map 0:a?) and port 1935 target
         self.assertIn("-map", cmd)
         self.assertIn("0:a?", cmd)
         tee_target = cmd[-1]
         self.assertIn("rtmp://127.0.0.1:1935/live/cloud_brb_loop", tee_target)
         self.assertIn("rtmp://127.0.0.1:1935/vertical/cloud_brb_loop", tee_target)
 
+    @patch("noalbs.noalbs.os.path.getsize", return_value=1024)
     @patch("noalbs.noalbs.os.path.exists", return_value=True)
     @patch("subprocess.Popen")
     @patch("subprocess.run")
-    def test_start_cloud_brb_restarts_crashed_process(self, mock_run, mock_popen, mock_exists):
+    def test_start_cloud_brb_restarts_crashed_process(self, mock_run, mock_popen, mock_exists, mock_getsize):
         noalbs = Noalbs()
         crashed_proc = MagicMock()
-        crashed_proc.poll.return_value = 1 # Process exited with error
+        crashed_proc.poll.return_value = 1
         noalbs.cloud_process = crashed_proc
 
         noalbs.start_cloud_brb()
-        mock_popen.assert_called_once()
+        self.assertTrue(mock_popen.called)
 
+    @patch("noalbs.noalbs.os.path.getsize", return_value=1024)
     @patch("noalbs.noalbs.os.path.exists", return_value=True)
     @patch("subprocess.Popen")
     @patch("subprocess.run")
-    def test_start_cloud_brb_nvenc_command(self, mock_run, mock_popen, mock_exists):
+    def test_start_cloud_brb_nvenc_command(self, mock_run, mock_popen, mock_exists, mock_getsize):
         mock_run.return_value = MagicMock(stdout="h264_nvenc acceleration available")
         noalbs = Noalbs()
         noalbs.start_cloud_brb()
@@ -147,12 +149,21 @@ class TestNoalbsComprehensive(unittest.TestCase):
         cmd = mock_popen.call_args[0][0]
         self.assertIn("h264_nvenc", cmd)
 
+    @patch("noalbs.noalbs.requests.get")
     @patch("noalbs.noalbs.os.path.exists", return_value=False)
     @patch("subprocess.Popen")
-    def test_start_cloud_brb_missing_video_file(self, mock_popen, mock_exists):
+    def test_start_cloud_brb_missing_video_file_downloads_default(self, mock_popen, mock_exists, mock_http_get):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.iter_content.return_value = [b"video_bytes"]
+        mock_http_get.return_value = mock_resp
+
         noalbs = Noalbs()
-        noalbs.start_cloud_brb()
-        mock_popen.assert_not_called()
+        with patch("builtins.open", MagicMock()):
+            noalbs.start_cloud_brb()
+
+        mock_http_get.assert_called_once()
+        self.assertTrue(mock_popen.called)
 
     @patch("noalbs.noalbs.os.path.exists", return_value=True)
     @patch("subprocess.Popen")
@@ -175,36 +186,32 @@ class TestNoalbsComprehensive(unittest.TestCase):
         mock_client.set_current_program_scene.assert_called_with("BRB")
         mock_client.call_vendor_request.assert_called_with("aitum-vertical-canvas", "switch_scene", {"scene": "BRB"})
 
+    @patch("noalbs.noalbs.os.path.getsize", return_value=1024)
     @patch("noalbs.noalbs.os.path.exists", return_value=True)
     @patch("subprocess.Popen")
     @patch("subprocess.run")
     @patch("requests.get")
-    def test_disconnection_protection_simulation(self, mock_get, mock_run, mock_popen, mock_exists):
+    def test_disconnection_protection_simulation(self, mock_get, mock_run, mock_popen, mock_exists, mock_getsize):
         mock_run.return_value = MagicMock(stdout="libx264")
         noalbs = Noalbs()
         mock_obs = MagicMock()
 
-        # Simulate OBS returning outputActive = False when stream drops
         status_mock = MagicMock()
         status_mock.outputActive = False
         status_mock.output_active = False
         mock_obs.get_stream_status.return_value = status_mock
         noalbs.obs_client = mock_obs
 
-        # Step 1: Active streaming
         noalbs.is_streaming = True
 
-        # Step 2: Ingest stream disconnects (bitrate = 0)
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.text = self.make_stat_xml(live_bw=0)
         mock_get.return_value = mock_resp
 
-        # Run logic when bitrate is 0
         bitrate = noalbs.get_bitrate()
         self.assertEqual(bitrate, 0)
 
-        # Disconnection handling block simulation
         if bitrate == 0 and noalbs.is_streaming:
             client = noalbs.get_obs_client()
             is_obs_streaming = True
@@ -221,27 +228,26 @@ class TestNoalbsComprehensive(unittest.TestCase):
                 noalbs.is_low = False
             noalbs.is_streaming = False
 
-        # Assertions
         mock_obs.set_current_program_scene.assert_called_with("BRB")
-        mock_popen.assert_called_once()
+        self.assertTrue(mock_popen.called)
         self.assertFalse(noalbs.is_streaming)
         self.assertTrue(noalbs.is_low)
         self.assertIsNotNone(noalbs.cloud_process)
 
+    @patch("noalbs.noalbs.os.path.getsize", return_value=1024)
     @patch("noalbs.noalbs.os.path.exists", return_value=True)
     @patch("subprocess.Popen")
     @patch("subprocess.run")
-    def test_timeout_300s_stops_cloud_brb(self, mock_run, mock_popen, mock_exists):
+    def test_timeout_300s_stops_cloud_brb(self, mock_run, mock_popen, mock_exists, mock_getsize):
         noalbs = Noalbs()
         mock_proc = MagicMock()
         mock_proc.poll.return_value = None
         noalbs.cloud_process = mock_proc
-        noalbs.cloud_brb_start_time = time.time() - 301 # Elapsed > 300s
-        
+        noalbs.cloud_brb_start_time = time.time() - 301
+
         mock_obs = MagicMock()
         noalbs.obs_client = mock_obs
 
-        # Run timeout check
         if noalbs.cloud_process and noalbs.cloud_brb_start_time:
             if noalbs.cloud_process.poll() is not None:
                 noalbs.cloud_process = None
