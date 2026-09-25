@@ -3,9 +3,13 @@ import time
 import os
 import logging
 import xml.etree.ElementTree as ET
-import obsws_python as obs
 import subprocess
 import signal
+
+try:
+    import obsws_python as obs
+except ImportError:
+    obs = None
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("NOALBS")
@@ -40,6 +44,9 @@ class Noalbs:
     def get_obs_client(self):
         if self.obs_client:
             return self.obs_client
+        if obs is None:
+            logger.warning("obsws_python library not available.")
+            return None
         try:
             # Using ReqClient for scene switching
             self.obs_client = obs.ReqClient(host=self.obs_host, port=self.obs_port, password=self.obs_password, timeout=3)

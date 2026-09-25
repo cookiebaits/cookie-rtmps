@@ -1,7 +1,21 @@
+import sys
+import os
 import unittest
 from unittest.mock import patch, MagicMock
-import os
-import sys
+
+# Fallback module mocking if dependencies are missing on the host Python environment
+try:
+    import requests
+except ImportError:
+    requests = MagicMock()
+    sys.modules['requests'] = requests
+
+try:
+    import obsws_python
+except ImportError:
+    obsws_python = MagicMock()
+    sys.modules['obsws_python'] = obsws_python
+
 import time
 import xml.etree.ElementTree as ET
 
@@ -39,7 +53,7 @@ class TestNoalbs(unittest.TestCase):
         noalbs_inst = Noalbs()
         self.assertTrue(noalbs_inst.ensure_brb_video())
 
-    @patch("requests.get")
+    @patch("noalbs.noalbs.requests.get")
     def test_ensure_brb_video_download_success(self, mock_get):
         mock_response = MagicMock()
         mock_response.status_code = 200
