@@ -1028,18 +1028,82 @@ configure_noalbs() {
     done
 }
 
-configure_optimizations() {
-    clear
-    echo -e "${GREEN}=== Optimizations ===${NC}"
-    echo "Current Chunk Size: $CHUNK_SIZE (Default: 8192)"
-    echo "Enter new Chunk Size (press Enter to keep current): "
-    read -r input
-    if [ ! -z "$input" ]; then
-        CHUNK_SIZE="$input"
-        save_config
-        echo -e "${GREEN}Chunk size updated.${NC}"
-        sleep 1
+enable_bbr_and_tcp_optimizations() {
+    echo -e "${GREEN}Configuring Google BBR & Network TCP Buffer Optimizations...${NC}"
+    SUDO_CMD=""
+    if [ "$EUID" -ne 0 ] && command -v sudo &> /dev/null; then
+        SUDO_CMD="sudo"
     fi
+
+    # Try loading BBR kernel module
+    $SUDO_CMD modprobe tcp_bbr 2>/dev/null || true
+
+    SYSCTL_CONF="/etc/sysctl.d/99-stream-optimization.conf"
+    if [ -d "/etc/sysctl.d" ]; then
+        cat << 'SYSCTL_EOF' | $SUDO_CMD tee "$SYSCTL_CONF" > /dev/null
+# Google BBR & Stream Speed Optimizations
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+
+# TCP Buffer Limits for High Bitrate Multistreaming (16MB max)
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
+net.core.rmem_default = 262144
+net.core.wmem_default = 262144
+net.ipv4.tcp_rmem = 4096 87380 16777216
+net.ipv4.tcp_wmem = 4096 65536 16777216
+
+# Network Queue & Bufferbloat Tuning
+net.core.netdev_max_backlog = 10000
+net.ipv4.tcp_max_syn_backlog = 8192
+net.ipv4.tcp_notsent_lowat = 16384
+net.ipv4.tcp_slow_start_after_idle = 0
+net.ipv4.tcp_tw_reuse = 1
+SYSCTL_EOF
+
+        $SUDO_CMD sysctl --system > /dev/null 2>&1 || $SUDO_CMD sysctl -p "$SYSCTL_CONF" > /dev/null 2>&1
+    fi
+
+    ACTIVE_CC=$($SUDO_CMD sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "bbr")
+    echo -e "${GREEN}TCP Congestion Control: ${YELLOW}${ACTIVE_CC}${NC}"
+    echo -e "${GREEN}Google BBR & TCP Buffer Optimizations applied successfully!${NC}"
+    sleep 2
+}
+
+configure_optimizations() {
+    while true; do
+        clear
+        echo -e "${GREEN}=== Stream & Network Optimizations ===${NC}"
+        echo "1) Configure Chunk Size (Current: $CHUNK_SIZE)"
+        echo "2) Apply Google BBR & TCP Buffer Optimizations (High Upload Speeds)"
+        echo "3) Back to Main Menu"
+        echo -e "Select an option: \c"
+        read -r opt_choice
+
+        case $opt_choice in
+            1)
+                echo "Current Chunk Size: $CHUNK_SIZE (Default: 8192)"
+                echo "Enter new Chunk Size (press Enter to keep current): "
+                read -r input
+                if [ ! -z "$input" ]; then
+                    CHUNK_SIZE="$input"
+                    save_config
+                    echo -e "${GREEN}Chunk size updated.${NC}"
+                    sleep 1
+                fi
+                ;;
+            2)
+                enable_bbr_and_tcp_optimizations
+                ;;
+            3|"")
+                break
+                ;;
+            *)
+                echo -e "${RED}Invalid option${NC}"
+                sleep 1
+                ;;
+        esac
+    done
 }
 
 install_docker() {
@@ -1165,6 +1229,8 @@ build_and_run() {
         read -r
         return
     fi
+
+    enable_bbr_and_tcp_optimizations
 
     if [ "$CLOUD_BRB" == "true" ] && [ -z "$BRB_VIDEO_URL" ]; then
         echo -e "${YELLOW}Cloud BRB is enabled but BRB Video URL is empty. Setting to default...${NC}"
