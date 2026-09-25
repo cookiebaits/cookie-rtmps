@@ -65,7 +65,18 @@ else
     echo -e "NOALBS is ${YELLOW}DISABLED${NC}, skipping check."
 fi
 
-# 5. Check Host Ports
+# 5. Run NOALBS Unit Tests
+echo -n "Running NOALBS component tests... "
+if docker exec $CONTAINER_NAME python3 /app/test_noalbs.py > /tmp/noalbs_test.log 2>&1; then
+    echo -e "[${GREEN}PASSED${NC}]"
+elif python3 test_noalbs.py > /tmp/noalbs_test.log 2>&1; then
+    echo -e "[${GREEN}PASSED${NC}]"
+else
+    echo -e "[${RED}FAILED${NC}]"
+    cat /tmp/noalbs_test.log 2>/dev/null || true
+fi
+
+# 6. Check Host Ports
 echo -n "Checking host port 1935 (RTMP)... "
 if command -v ss &> /dev/null; then
     if ss -tuln | grep -q ":1935 "; then

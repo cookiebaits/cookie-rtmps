@@ -4,6 +4,19 @@ import os
 import sys
 import time
 
+# Mock missing third-party packages if not installed in current environment
+try:
+    import requests
+except ImportError:
+    mock_requests = MagicMock()
+    sys.modules["requests"] = mock_requests
+
+try:
+    import obsws_python
+except ImportError:
+    mock_obsws = MagicMock()
+    sys.modules["obsws_python"] = mock_obsws
+
 # Add repo root to path
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
@@ -19,6 +32,7 @@ class TestNoalbsComprehensive(unittest.TestCase):
         os.environ["APP_NAME"] = "live"
         os.environ["OBS_SCENE_LIVE"] = "Main"
         os.environ["OBS_SCENE_BRB"] = "BRB"
+        os.environ["CLOUD_BRB_TIMEOUT"] = "300"
 
     def make_stat_xml(self, live_bw=0, vert_bw=0, include_cloud_brb=False):
         xml = f"""<?xml version="1.0" encoding="UTF-8" ?>
@@ -87,10 +101,10 @@ class TestNoalbsComprehensive(unittest.TestCase):
         bitrate = noalbs.get_bitrate()
         self.assertEqual(bitrate, 0)
 
-    @patch("noalbs.noalbs.os.path.exists", return_value=True)
+    @patch("noalbs.noalbs.is_valid_file", return_value=True)
     @patch("subprocess.Popen")
     @patch("subprocess.run")
-    def test_start_cloud_brb_libx264_command(self, mock_run, mock_popen, mock_exists):
+    def test_start_cloud_brb_libx264_command(self, mock_run, mock_popen, mock_is_valid):
         mock_run.return_value = MagicMock(stdout="libx264")
         noalbs = Noalbs()
         noalbs.start_cloud_brb()
@@ -108,10 +122,10 @@ class TestNoalbsComprehensive(unittest.TestCase):
         self.assertIn("rtmp://127.0.0.1:19352/live/cloud_brb_loop", tee_target)
         self.assertIn("rtmp://127.0.0.1:19352/vertical/cloud_brb_loop", tee_target)
 
-    @patch("noalbs.noalbs.os.path.exists", return_value=True)
+    @patch("noalbs.noalbs.is_valid_file", return_value=True)
     @patch("subprocess.Popen")
     @patch("subprocess.run")
-    def test_start_cloud_brb_restarts_crashed_process(self, mock_run, mock_popen, mock_exists):
+    def test_start_cloud_brb_restarts_crashed_process(self, mock_run, mock_popen, mock_is_valid):
         noalbs = Noalbs()
         crashed_proc = MagicMock()
         crashed_proc.poll.return_value = 1 # Process exited with error
@@ -120,10 +134,10 @@ class TestNoalbsComprehensive(unittest.TestCase):
         noalbs.start_cloud_brb()
         mock_popen.assert_called_once()
 
-    @patch("noalbs.noalbs.os.path.exists", return_value=True)
+    @patch("noalbs.noalbs.is_valid_file", return_value=True)
     @patch("subprocess.Popen")
     @patch("subprocess.run")
-    def test_start_cloud_brb_nvenc_command(self, mock_run, mock_popen, mock_exists):
+    def test_start_cloud_brb_nvenc_command(self, mock_run, mock_popen, mock_is_valid):
         mock_run.return_value = MagicMock(stdout="h264_nvenc acceleration available")
         noalbs = Noalbs()
         noalbs.start_cloud_brb()
@@ -131,16 +145,44 @@ class TestNoalbsComprehensive(unittest.TestCase):
         cmd = mock_popen.call_args[0][0]
         self.assertIn("h264_nvenc", cmd)
 
-    @patch("noalbs.noalbs.os.path.exists", return_value=False)
+    @patch("noalbs.noalbs.is_valid_file", return_value=False)
     @patch("subprocess.Popen")
-    def test_start_cloud_brb_missing_video_file(self, mock_popen, mock_exists):
+    @patch.object(Noalbs, "ensure_brb_video_ready")
+    def test_start_cloud_brb_missing_video_file(self, mock_ensure, mock_popen, mock_is_valid):
         noalbs = Noalbs()
         noalbs.start_cloud_brb()
-        mock_popen.assert_not_called()
+        mock_ensure.assert_called_once()
 
-    @patch("noalbs.noalbs.os.path.exists", return_value=True)
+    @patch("noalbs.noalbs.urllib.request.urlretrieve")
+    @patch("subprocess.run")
+    @patch("noalbs.noalbs.is_valid_file")
+    def test_ensure_brb_video_ready_downloads_default_and_transcodes(self, mock_is_valid, mock_run, mock_urlretrieve):
+        # File missing initially (False), then present after download/transcode (True)
+        mock_is_valid.side_effect = [False, True, True, True]
+        mock_run.return_value = MagicMock(returncode=0)
+
+        noalbs = Noalbs()
+        noalbs.ensure_brb_video_ready()
+
+        mock_urlretrieve.assert_called_once()
+        downloaded_url = mock_urlretrieve.call_args[0][0]
+        self.assertEqual(downloaded_url, "https://filedn.com/lfh40bKbFfD5um9HDFNrJFR/brb.mp4")
+
+        # Verify FFmpeg transcode call included AAC audio and H.264
+        mock_run.assert_called_once()
+        ffmpeg_cmd = mock_run.call_args[0][0]
+        self.assertEqual(ffmpeg_cmd[0], "ffmpeg")
+        self.assertIn("libx264", ffmpeg_cmd)
+        self.assertIn("aac", ffmpeg_cmd)
+
+    def test_cloud_brb_timeout_env_config(self):
+        os.environ["CLOUD_BRB_TIMEOUT"] = "600"
+        noalbs = Noalbs()
+        self.assertEqual(noalbs.cloud_brb_timeout, 600)
+
+    @patch("noalbs.noalbs.is_valid_file", return_value=True)
     @patch("subprocess.Popen")
-    def test_stop_cloud_brb(self, mock_popen, mock_exists):
+    def test_stop_cloud_brb(self, mock_popen, mock_is_valid):
         noalbs = Noalbs()
         mock_proc = MagicMock()
         noalbs.cloud_process = mock_proc
@@ -159,11 +201,11 @@ class TestNoalbsComprehensive(unittest.TestCase):
         mock_client.set_current_program_scene.assert_called_with("BRB")
         mock_client.call_vendor_request.assert_called_with("aitum-vertical-canvas", "switch_scene", {"scene": "BRB"})
 
-    @patch("noalbs.noalbs.os.path.exists", return_value=True)
+    @patch("noalbs.noalbs.is_valid_file", return_value=True)
     @patch("subprocess.Popen")
     @patch("subprocess.run")
     @patch("requests.get")
-    def test_disconnection_protection_simulation(self, mock_get, mock_run, mock_popen, mock_exists):
+    def test_disconnection_protection_simulation(self, mock_get, mock_run, mock_popen, mock_is_valid):
         mock_run.return_value = MagicMock(stdout="libx264")
         noalbs = Noalbs()
         mock_obs = MagicMock()
@@ -212,13 +254,13 @@ class TestNoalbsComprehensive(unittest.TestCase):
         self.assertTrue(noalbs.is_low)
         self.assertIsNotNone(noalbs.cloud_process)
 
-    @patch("noalbs.noalbs.os.path.exists", return_value=True)
+    @patch("noalbs.noalbs.is_valid_file", return_value=True)
     @patch("subprocess.Popen")
     @patch("subprocess.run")
-    def test_timeout_300s_stops_cloud_brb(self, mock_run, mock_popen, mock_exists):
+    def test_timeout_300s_stops_cloud_brb(self, mock_run, mock_popen, mock_is_valid):
         noalbs = Noalbs()
         mock_proc = MagicMock()
-        mock_proc.poll.return_value = None
+        mock_proc.poll = MagicMock(return_value=None)
         noalbs.cloud_process = mock_proc
         noalbs.cloud_brb_start_time = time.time() - 301 # Elapsed > 300s
         

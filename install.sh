@@ -83,6 +83,7 @@ LOW_BITRATE="1000"
 RESTORE_BITRATE="1500"
 CLOUD_BRB="true"
 BRB_VIDEO_URL=""
+CLOUD_BRB_TIMEOUT="300"
 
 CONFIG_FILE="rtmp_config.env"
 
@@ -155,6 +156,7 @@ LOW_BITRATE="$LOW_BITRATE"
 RESTORE_BITRATE="$RESTORE_BITRATE"
 CLOUD_BRB="$CLOUD_BRB"
 BRB_VIDEO_URL="$BRB_VIDEO_URL"
+CLOUD_BRB_TIMEOUT="$CLOUD_BRB_TIMEOUT"
 PORT_RTMP="$PORT_RTMP"
 PORT_HTTP="$PORT_HTTP"
 PORT_STATS="$PORT_STATS"
@@ -963,6 +965,36 @@ configure_chat() {
     done
 }
 
+ensure_brb_video_transcoded() {
+    local url="${1:-$BRB_VIDEO_URL}"
+    local target="./data/brb_video.mp4"
+    if [ -z "$url" ]; then
+        url="https://filedn.com/lfh40bKbFfD5um9HDFNrJFR/brb.mp4"
+    fi
+    mkdir -p ./data
+    rm -f "$target"
+    echo -e "${YELLOW}Downloading BRB video from $url ...${NC}"
+    curl -L "$url" -o "${target}.tmp"
+    if [ -f "${target}.tmp" ] && [ -s "${target}.tmp" ]; then
+        if command -v ffmpeg &> /dev/null; then
+            echo -e "${YELLOW}Transcoding BRB video with FFmpeg to ensure AAC audio and H.264 video compatibility...${NC}"
+            ffmpeg -y -hide_banner -loglevel warning -i "${target}.tmp" -c:v libx264 -pix_fmt yuv420p -g 60 -c:a aac -ar 48000 -ac 2 "$target"
+            if [ $? -eq 0 ] && [ -s "$target" ]; then
+                echo -e "${GREEN}BRB video successfully downloaded and transcoded.${NC}"
+                rm -f "${target}.tmp"
+            else
+                echo -e "${YELLOW}FFmpeg transcode warning. Using downloaded file directly.${NC}"
+                mv "${target}.tmp" "$target"
+            fi
+        else
+            mv "${target}.tmp" "$target"
+        fi
+    else
+        echo -e "${RED}Download failed.${NC}"
+        rm -f "${target}.tmp"
+    fi
+}
+
 configure_noalbs() {
     while true; do
         clear
@@ -979,7 +1011,8 @@ configure_noalbs() {
         echo "8) Restore Bitrate Threshold (Current: $RESTORE_BITRATE kbps)"
         echo "9) Toggle Cloud BRB (Currently: $CLOUD_BRB)"
         echo "10) Configure BRB Video URL (Current: ${BRB_VIDEO_URL:-(None)})"
-        echo "11) Back to Main Menu"
+        echo "11) Disconnection Protection Duration (Current: ${CLOUD_BRB_TIMEOUT} seconds)"
+        echo "12) Back to Main Menu"
         echo -e "Select an option: \c"
         read -r noalbs_opt
 
@@ -1040,17 +1073,52 @@ configure_noalbs() {
                 elif [ ! -z "$input" ]; then
                     BRB_VIDEO_URL="$input"
                     save_config
-                    mkdir -p ./data
-                    rm -f ./data/brb_video.mp4
-                    echo -e "${YELLOW}Downloading BRB video from $BRB_VIDEO_URL ...${NC}"
-                    curl -L "$BRB_VIDEO_URL" -o ./data/brb_video.mp4 && echo -e "${GREEN}Downloaded.${NC}" || echo -e "${RED}Download failed.${NC}"
+                    ensure_brb_video_transcoded "$BRB_VIDEO_URL"
                     sleep 2
                 fi
                 ;;
-            11) break ;;
+            11)
+                echo -e "Enter Disconnection Video Protection Duration in seconds (e.g. 300):"
+                read -r input
+                if [ ! -z "$input" ]; then
+                    CLOUD_BRB_TIMEOUT="$input"
+                    save_config
+                    echo -e "${GREEN}Disconnection protection duration updated to $CLOUD_BRB_TIMEOUT seconds.${NC}"
+                    sleep 1
+                fi
+                ;;
+            12) break ;;
             *) echo -e "${RED}Invalid option${NC}" ; sleep 1 ;;
         esac
     done
+}
+
+enable_bbr_and_tcp_optimizations() {
+    echo -e "${GREEN}Configuring Google BBR & Network TCP Buffer Optimizations...${NC}"
+    if [ "$EUID" -ne 0 ] && command -v sudo &> /dev/null; then
+        SUDO="sudo"
+    else
+        SUDO=""
+    fi
+
+    $SUDO modprobe tcp_bbr 2>/dev/null || true
+
+    SYSCTL_CONF="/etc/sysctl.d/99-stream-optimization.conf"
+    echo -e "${YELLOW}Writing sysctl network tuning parameters to $SYSCTL_CONF ...${NC}"
+
+    cat << 'SYSCTL_EOF' | $SUDO tee "$SYSCTL_CONF" >/dev/null
+# Google BBR Congestion Control & Buffer Tuning
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
+net.ipv4.tcp_rmem = 4096 87380 16777216
+net.ipv4.tcp_wmem = 4096 65536 16777216
+net.ipv4.tcp_notsent_lowat = 16384
+SYSCTL_EOF
+
+    $SUDO sysctl -p "$SYSCTL_CONF" 2>/dev/null || $SUDO sysctl --system 2>/dev/null || true
+    echo -e "${GREEN}Network TCP buffer optimizations applied successfully.${NC}"
 }
 
 configure_optimizations() {
@@ -1063,8 +1131,11 @@ configure_optimizations() {
         CHUNK_SIZE="$input"
         save_config
         echo -e "${GREEN}Chunk size updated.${NC}"
-        sleep 1
     fi
+
+    echo -e "\nApplying Google BBR and TCP optimizations..."
+    enable_bbr_and_tcp_optimizations
+    sleep 2
 }
 
 install_docker() {
@@ -1102,12 +1173,14 @@ build_and_run() {
         return
     fi
 
-    echo -e "${YELLOW}Stopping and removing any old container instances...${NC}"
+    echo -e "${YELLOW}Stopping and removing any old container instances and associated Docker volumes...${NC}"
     OLD_CONTAINERS=$(docker ps -a --format '{{.ID}} {{.Names}}' | grep -i rtmps | awk '{print $1}')
     if [ ! -z "$OLD_CONTAINERS" ]; then
         docker stop $OLD_CONTAINERS 2>/dev/null || true
-        docker rm $OLD_CONTAINERS 2>/dev/null || true
+        docker rm -v -f $OLD_CONTAINERS 2>/dev/null || true
     fi
+
+    enable_bbr_and_tcp_optimizations
 
     echo -e "${YELLOW}Checking for port conflicts...${NC}"
     CONFLICTS=0
@@ -1188,7 +1261,7 @@ build_and_run() {
     fi
 
     mkdir -p ./data
-    if [ -f "./data/brb_video.mp4" ]; then
+    if [ -f "./data/brb_video.mp4" ] && [ -s "./data/brb_video.mp4" ]; then
         echo -e "${GREEN}Existing BRB video found at ./data/brb_video.mp4. Preserving video source.${NC}"
     else
         if [ -z "$BRB_VIDEO_URL" ]; then
@@ -1196,8 +1269,7 @@ build_and_run() {
             BRB_VIDEO_URL="https://filedn.com/lfh40bKbFfD5um9HDFNrJFR/brb.mp4"
             save_config
         fi
-        echo -e "${YELLOW}Downloading BRB video from $BRB_VIDEO_URL ...${NC}"
-        curl -L "$BRB_VIDEO_URL" -o ./data/brb_video.mp4 && echo -e "${GREEN}Downloaded BRB video.${NC}" || echo -e "${RED}Failed to download BRB video.${NC}"
+        ensure_brb_video_transcoded "$BRB_VIDEO_URL"
     fi
 
     echo -e "${GREEN}Building Docker Image...${NC}"
@@ -1276,6 +1348,7 @@ build_and_run() {
         -e LOW_BITRATE="$LOW_BITRATE" \
         -e RESTORE_BITRATE="$RESTORE_BITRATE" \
         -e CLOUD_BRB="$CLOUD_BRB" \
+        -e CLOUD_BRB_TIMEOUT="$CLOUD_BRB_TIMEOUT" \
         -v "$(pwd)/data:/app/data" \
         cookie-rtmps
 
@@ -1375,22 +1448,23 @@ stop_and_uninstall() {
     OLD_CONTAINERS=$(docker ps -a --format '{{.ID}} {{.Names}}' | grep -i rtmps | awk '{print $1}')
     if [ ! -z "$OLD_CONTAINERS" ]; then
         docker stop $OLD_CONTAINERS 2>/dev/null && echo -e "${GREEN}Containers stopped.${NC}" || true
-        docker rm $OLD_CONTAINERS 2>/dev/null && echo -e "${GREEN}Containers removed, ports unbound.${NC}" || true
+        docker rm -v -f $OLD_CONTAINERS 2>/dev/null && echo -e "${GREEN}Containers and volumes removed, ports unbound.${NC}" || true
     else
         docker stop cookie-rtmps 2>/dev/null && echo -e "${GREEN}Container stopped.${NC}" || echo -e "${RED}Container not running.${NC}"
-        docker rm cookie-rtmps 2>/dev/null && echo -e "${GREEN}Container removed, ports unbound.${NC}" || true
+        docker rm -v -f cookie-rtmps 2>/dev/null && echo -e "${GREEN}Container and volumes removed, ports unbound.${NC}" || true
     fi
 
     OLD_IMAGES=$(docker images --format '{{.ID}} {{.Repository}}' | grep -i rtmps | awk '{print $1}')
     if [ ! -z "$OLD_IMAGES" ]; then
         docker rmi -f $OLD_IMAGES 2>/dev/null && echo -e "${GREEN}Images removed.${NC}" || true
     else
-        docker rmi cookie-rtmps 2>/dev/null && echo -e "${GREEN}Image removed.${NC}" || true
+        docker rmi -f cookie-rtmps 2>/dev/null && echo -e "${GREEN}Image removed.${NC}" || true
     fi
 
     echo -e "${YELLOW}Pruning Docker build cache and unused images...${NC}"
-    docker image prune -f 2>/dev/null || true
-    docker builder prune -f 2>/dev/null || true
+    docker image prune -a -f 2>/dev/null || true
+    docker builder prune -a -f 2>/dev/null || true
+    docker system prune -a -f 2>/dev/null || true
 
     echo -e "${YELLOW}Removing local configuration files and data cache...${NC}"
     rm -f rtmp_config.env

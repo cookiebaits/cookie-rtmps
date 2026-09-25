@@ -61,6 +61,7 @@ COPY stream_validator.py /app/stream_validator.py
 COPY update_titles.py /app/update_titles.py
 COPY tiktok_pusher.py /app/tiktok_pusher.py
 COPY tiktok_search.py /app/tiktok_search.py
+COPY test_noalbs.py /app/test_noalbs.py
 COPY noalbs /app/noalbs
 
 # Config Stunnel
