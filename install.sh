@@ -1241,6 +1241,8 @@ build_and_run() {
         -e LOW_BITRATE="$LOW_BITRATE" \
         -e RESTORE_BITRATE="$RESTORE_BITRATE" \
         -e CLOUD_BRB="$CLOUD_BRB" \
+        -e BRB_VIDEO_URL="$BRB_VIDEO_URL" \
+        -e CLOUD_BRB_TIMEOUT="${CLOUD_BRB_TIMEOUT:-300}" \
         -v "$(pwd)/data:/app/data" \
         cookie-rtmps
 
