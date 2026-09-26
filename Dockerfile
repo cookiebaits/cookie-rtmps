@@ -98,6 +98,7 @@ ENV KICK_URL=rtmp://127.0.0.1:19356/kick/
 ENV X_URL=rtmp://127.0.0.1:19354/x/
 ENV APP_NAME=live
 ENV CHUNK_SIZE=8192
+ENV FALLBACK_MODE=video
 
 COPY docker-entrypoint.sh /docker-entrypoint.sh
 RUN chmod +x /docker-entrypoint.sh

@@ -26,6 +26,7 @@ class TestNoalbsComprehensive(unittest.TestCase):
 
     def setUp(self):
         os.environ["NOALBS_ENABLED"] = "true"
+        os.environ["FALLBACK_MODE"] = "video"
         os.environ["CLOUD_BRB"] = "true"
         os.environ["LOW_BITRATE"] = "1000"
         os.environ["RESTORE_BITRATE"] = "1500"
@@ -33,6 +34,15 @@ class TestNoalbsComprehensive(unittest.TestCase):
         os.environ["OBS_SCENE_LIVE"] = "Main"
         os.environ["OBS_SCENE_BRB"] = "BRB"
         os.environ["CLOUD_BRB_TIMEOUT"] = "300"
+
+    def test_fallback_mode_config(self):
+        os.environ["FALLBACK_MODE"] = "obs"
+        noalbs = Noalbs()
+        self.assertEqual(noalbs.fallback_mode, "obs")
+
+        os.environ["FALLBACK_MODE"] = "video"
+        noalbs_video = Noalbs()
+        self.assertEqual(noalbs_video.fallback_mode, "video")
 
     def make_stat_xml(self, live_bw=0, vert_bw=0, include_cloud_brb=False):
         xml = f"""<?xml version="1.0" encoding="UTF-8" ?>
@@ -154,12 +164,18 @@ class TestNoalbsComprehensive(unittest.TestCase):
         mock_ensure.assert_called_once()
 
     @patch("noalbs.noalbs.urllib.request.urlretrieve")
+    @patch("subprocess.Popen")
     @patch("subprocess.run")
     @patch("noalbs.noalbs.is_valid_file")
-    def test_ensure_brb_video_ready_downloads_default_and_transcodes(self, mock_is_valid, mock_run, mock_urlretrieve):
+    def test_ensure_brb_video_ready_downloads_default_and_transcodes(self, mock_is_valid, mock_run, mock_popen, mock_urlretrieve):
         # File missing initially (False), then present after download/transcode (True)
         mock_is_valid.side_effect = [False, True, True, True]
-        mock_run.return_value = MagicMock(returncode=0)
+        mock_run.return_value = MagicMock(returncode=0, stdout="10.0")
+
+        mock_proc = MagicMock()
+        mock_proc.stdout = ["out_time_ms=5000000\n"]
+        mock_proc.returncode = 0
+        mock_popen.return_value = mock_proc
 
         noalbs = Noalbs()
         noalbs.ensure_brb_video_ready()
@@ -168,9 +184,9 @@ class TestNoalbsComprehensive(unittest.TestCase):
         downloaded_url = mock_urlretrieve.call_args[0][0]
         self.assertEqual(downloaded_url, "https://filedn.com/lfh40bKbFfD5um9HDFNrJFR/brb.mp4")
 
-        # Verify FFmpeg transcode call included AAC audio and H.264
-        mock_run.assert_called_once()
-        ffmpeg_cmd = mock_run.call_args[0][0]
+        # Verify FFmpeg transcode call via Popen included AAC audio and H.264
+        mock_popen.assert_called_once()
+        ffmpeg_cmd = mock_popen.call_args[0][0]
         self.assertEqual(ffmpeg_cmd[0], "ffmpeg")
         self.assertIn("libx264", ffmpeg_cmd)
         self.assertIn("aac", ffmpeg_cmd)
