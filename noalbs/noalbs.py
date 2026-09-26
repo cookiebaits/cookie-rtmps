@@ -32,6 +32,7 @@ class Noalbs:
         # NOALBS uses internal port 8081 for stats
         self.stats_url = "http://127.0.0.1:8081/stat"
 
+        self.fallback_mode = os.getenv("FALLBACK_MODE", "video").lower().strip()
         self.cloud_brb_enabled = os.getenv("CLOUD_BRB", "false").lower() == "true"
         self.brb_video_path = os.getenv("BRB_VIDEO_PATH", "/app/data/brb_video.mp4")
         self.cloud_brb_timeout = int(os.getenv("CLOUD_BRB_TIMEOUT", 300))
@@ -257,16 +258,22 @@ class Noalbs:
                 if bitrate < self.low_threshold:
                     if not self.is_low:
                         logger.error(f"Stream disruption: Low bitrate ({bitrate}kbps < {self.low_threshold}kbps).")
-                        logger.warning(f"Process of noalbs taking over: Switching OBS scene to {self.scene_brb} and starting Cloud BRB fallback")
-                        self.switch_scene(self.scene_brb)
                         self.is_low = True
-                        if self.cloud_brb_enabled:
-                            self.start_cloud_brb()
+                        if self.fallback_mode == "obs":
+                            logger.warning(f"Process of noalbs taking over: Switching OBS scene to {self.scene_brb}")
+                            self.switch_scene(self.scene_brb)
+                        else:
+                            logger.warning("Process of noalbs taking over: Starting Cloud BRB fallback video stream")
+                            if self.cloud_brb_enabled:
+                                self.start_cloud_brb()
                 else:
                     self.stop_cloud_brb()
                     if bitrate >= self.restore_threshold and self.is_low:
-                        logger.info(f"Bitrate restored ({bitrate}kbps). Switching OBS scene to {self.scene_main}")
-                        self.switch_scene(self.scene_main)
+                        if self.fallback_mode == "obs":
+                            logger.info(f"Bitrate restored ({bitrate}kbps). Switching OBS scene to {self.scene_main}")
+                            self.switch_scene(self.scene_main)
+                        else:
+                            logger.info(f"Bitrate restored ({bitrate}kbps). Cloud BRB fallback video stopped.")
                         self.is_low = False
             else:
                 consecutive_low = 0
@@ -288,11 +295,14 @@ class Noalbs:
 
                     if is_obs_streaming or self.cloud_brb_enabled:
                         logger.error("Process of noalbs taking over: Source stream disconnected / dropped! Bitrate 0 kbps.")
-                        logger.warning(f"Switching OBS scene to {self.scene_brb} and starting Cloud BRB fallback.")
-                        self.switch_scene(self.scene_brb)
                         self.is_low = True
-                        if self.cloud_brb_enabled:
-                            self.start_cloud_brb()
+                        if self.fallback_mode == "obs":
+                            logger.warning(f"Switching OBS scene to {self.scene_brb}.")
+                            self.switch_scene(self.scene_brb)
+                        else:
+                            logger.warning("Starting Cloud BRB fallback video stream.")
+                            if self.cloud_brb_enabled:
+                                self.start_cloud_brb()
                     else:
                         logger.info("Source stream ended cleanly.")
                         self.is_low = False

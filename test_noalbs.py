@@ -26,6 +26,7 @@ class TestNoalbsComprehensive(unittest.TestCase):
 
     def setUp(self):
         os.environ["NOALBS_ENABLED"] = "true"
+        os.environ["FALLBACK_MODE"] = "video"
         os.environ["CLOUD_BRB"] = "true"
         os.environ["LOW_BITRATE"] = "1000"
         os.environ["RESTORE_BITRATE"] = "1500"
@@ -205,32 +206,28 @@ class TestNoalbsComprehensive(unittest.TestCase):
     @patch("subprocess.Popen")
     @patch("subprocess.run")
     @patch("requests.get")
-    def test_disconnection_protection_simulation(self, mock_get, mock_run, mock_popen, mock_is_valid):
+    def test_disconnection_protection_simulation_video_mode(self, mock_get, mock_run, mock_popen, mock_is_valid):
         mock_run.return_value = MagicMock(stdout="libx264")
+        os.environ["FALLBACK_MODE"] = "video"
         noalbs = Noalbs()
         mock_obs = MagicMock()
 
-        # Simulate OBS returning outputActive = False when stream drops
         status_mock = MagicMock()
         status_mock.outputActive = False
         status_mock.output_active = False
         mock_obs.get_stream_status.return_value = status_mock
         noalbs.obs_client = mock_obs
 
-        # Step 1: Active streaming
         noalbs.is_streaming = True
 
-        # Step 2: Ingest stream disconnects (bitrate = 0)
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.text = self.make_stat_xml(live_bw=0)
         mock_get.return_value = mock_resp
 
-        # Run logic when bitrate is 0
         bitrate = noalbs.get_bitrate()
         self.assertEqual(bitrate, 0)
 
-        # Disconnection handling block simulation
         if bitrate == 0 and noalbs.is_streaming:
             client = noalbs.get_obs_client()
             is_obs_streaming = True
@@ -239,20 +236,73 @@ class TestNoalbsComprehensive(unittest.TestCase):
                 is_obs_streaming = getattr(status, 'output_active', getattr(status, 'outputActive', True))
 
             if is_obs_streaming or noalbs.cloud_brb_enabled:
-                noalbs.switch_scene(noalbs.scene_brb)
                 noalbs.is_low = True
-                if noalbs.cloud_brb_enabled:
-                    noalbs.start_cloud_brb()
+                if noalbs.fallback_mode == "obs":
+                    noalbs.switch_scene(noalbs.scene_brb)
+                else:
+                    if noalbs.cloud_brb_enabled:
+                        noalbs.start_cloud_brb()
             else:
                 noalbs.is_low = False
             noalbs.is_streaming = False
 
-        # Assertions
-        mock_obs.set_current_program_scene.assert_called_with("BRB")
+        # Assertions: Video fallback triggered, OBS scene NOT switched
+        mock_obs.set_current_program_scene.assert_not_called()
         mock_popen.assert_called_once()
         self.assertFalse(noalbs.is_streaming)
         self.assertTrue(noalbs.is_low)
         self.assertIsNotNone(noalbs.cloud_process)
+
+    @patch("noalbs.noalbs.is_valid_file", return_value=True)
+    @patch("subprocess.Popen")
+    @patch("subprocess.run")
+    @patch("requests.get")
+    def test_disconnection_protection_simulation_obs_mode(self, mock_get, mock_run, mock_popen, mock_is_valid):
+        mock_run.return_value = MagicMock(stdout="libx264")
+        os.environ["FALLBACK_MODE"] = "obs"
+        noalbs = Noalbs()
+        mock_obs = MagicMock()
+
+        status_mock = MagicMock()
+        status_mock.outputActive = False
+        status_mock.output_active = False
+        mock_obs.get_stream_status.return_value = status_mock
+        noalbs.obs_client = mock_obs
+
+        noalbs.is_streaming = True
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.text = self.make_stat_xml(live_bw=0)
+        mock_get.return_value = mock_resp
+
+        bitrate = noalbs.get_bitrate()
+        self.assertEqual(bitrate, 0)
+
+        if bitrate == 0 and noalbs.is_streaming:
+            client = noalbs.get_obs_client()
+            is_obs_streaming = True
+            if client:
+                status = client.get_stream_status()
+                is_obs_streaming = getattr(status, 'output_active', getattr(status, 'outputActive', True))
+
+            if is_obs_streaming or noalbs.cloud_brb_enabled:
+                noalbs.is_low = True
+                if noalbs.fallback_mode == "obs":
+                    noalbs.switch_scene(noalbs.scene_brb)
+                else:
+                    if noalbs.cloud_brb_enabled:
+                        noalbs.start_cloud_brb()
+            else:
+                noalbs.is_low = False
+            noalbs.is_streaming = False
+
+        # Assertions: OBS scene switched, Video fallback NOT started
+        mock_obs.set_current_program_scene.assert_called_with("BRB")
+        mock_popen.assert_not_called()
+        self.assertFalse(noalbs.is_streaming)
+        self.assertTrue(noalbs.is_low)
+        self.assertIsNone(noalbs.cloud_process)
 
     @patch("noalbs.noalbs.is_valid_file", return_value=True)
     @patch("subprocess.Popen")
