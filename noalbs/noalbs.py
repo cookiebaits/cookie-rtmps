@@ -32,6 +32,7 @@ class Noalbs:
         # NOALBS uses internal port 8081 for stats
         self.stats_url = "http://127.0.0.1:8081/stat"
 
+        self.fallback_mode = os.getenv("FALLBACK_MODE", "video").lower()
         self.cloud_brb_enabled = os.getenv("CLOUD_BRB", "false").lower() == "true"
         self.brb_video_path = os.getenv("BRB_VIDEO_PATH", "/app/data/brb_video.mp4")
         self.cloud_brb_timeout = int(os.getenv("CLOUD_BRB_TIMEOUT", 300))
@@ -58,18 +59,51 @@ class Noalbs:
 
                 # Transcode and verify compatibility using FFmpeg (H.264 + AAC 48kHz stereo)
                 logger.info("Transcoding downloaded BRB video with FFmpeg to ensure AAC/H.264 compatibility...")
+
+                duration = 0.0
+                try:
+                    probe_cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprintwrappers=1:nokey=1", tmp_path]
+                    probe_res = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=10)
+                    if probe_res.returncode == 0 and probe_res.stdout.strip():
+                        duration = float(probe_res.stdout.strip())
+                except Exception:
+                    duration = 0.0
+
                 transcode_cmd = [
                     "ffmpeg", "-y", "-hide_banner", "-loglevel", "warning",
                     "-i", tmp_path,
                     "-c:v", "libx264", "-pix_fmt", "yuv420p", "-g", "60",
                     "-c:a", "aac", "-ar", "48000", "-ac", "2",
+                    "-progress", "pipe:1",
                     target_path
                 ]
-                res = subprocess.run(transcode_cmd, capture_output=True, text=True, timeout=120)
-                if res.returncode == 0 and is_valid_file(target_path):
-                    logger.info("BRB video successfully downloaded and transcoded.")
-                else:
-                    logger.warning("FFmpeg transcoding failed or not available. Using downloaded raw file.")
+
+                try:
+                    proc = subprocess.Popen(transcode_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+                    if proc.stdout:
+                        for line in proc.stdout:
+                            line = line.strip()
+                            if line.startswith("out_time_us=") and duration > 0:
+                                try:
+                                    us = float(line.split("=")[1])
+                                    pct = min(100.0, (us / 1000000.0 / duration) * 100.0)
+                                    filled = int(pct * 30 / 100)
+                                    bar = "=" * filled + (">" if filled < 30 else "") + " " * (29 - filled if filled < 30 else 0)
+                                    print(f"\rTranscoding BRB Video: [{bar}] {pct:.1f}%", end="", flush=True)
+                                except ValueError:
+                                    pass
+                    proc.wait()
+                    if duration > 0:
+                        print("") # New line after progress bar finish
+
+                    if proc.returncode == 0 and is_valid_file(target_path):
+                        logger.info("BRB video successfully downloaded and transcoded.")
+                    else:
+                        logger.warning("FFmpeg transcoding failed or not available. Using downloaded raw file.")
+                        if os.path.exists(tmp_path):
+                            os.replace(tmp_path, target_path)
+                except Exception as ex:
+                    logger.warning(f"FFmpeg transcode process error: {ex}. Using downloaded raw file.")
                     if os.path.exists(tmp_path):
                         os.replace(tmp_path, target_path)
                 if os.path.exists(tmp_path):
@@ -124,7 +158,7 @@ class Noalbs:
             return 0
 
     def start_cloud_brb(self):
-        if not self.cloud_brb_enabled:
+        if not self.cloud_brb_enabled and self.fallback_mode != "video":
             return
 
         if self.cloud_process:
@@ -257,11 +291,13 @@ class Noalbs:
                 if bitrate < self.low_threshold:
                     if not self.is_low:
                         logger.error(f"Stream disruption: Low bitrate ({bitrate}kbps < {self.low_threshold}kbps).")
-                        logger.warning(f"Process of noalbs taking over: Switching OBS scene to {self.scene_brb} and starting Cloud BRB fallback")
-                        self.switch_scene(self.scene_brb)
+                        logger.warning(f"Process of noalbs taking over: Triggering fallback (mode: {self.fallback_mode})")
                         self.is_low = True
-                        if self.cloud_brb_enabled:
+                        if self.fallback_mode == "video" or self.cloud_brb_enabled:
                             self.start_cloud_brb()
+                            self.switch_scene(self.scene_brb)
+                        else:
+                            self.switch_scene(self.scene_brb)
                 else:
                     self.stop_cloud_brb()
                     if bitrate >= self.restore_threshold and self.is_low:
@@ -271,31 +307,14 @@ class Noalbs:
             else:
                 consecutive_low = 0
                 if self.is_streaming:
-                    client = self.get_obs_client()
-                    # Default to True if we can't connect, assuming a severe network drop
-                    is_obs_streaming = True
-                    if client:
-                        try:
-                            status = client.get_stream_status()
-                            is_obs_streaming = getattr(status, 'output_active', getattr(status, 'outputActive', True))
-                        except Exception as e:
-                            logger.error(f"Failed to get OBS stream status: {e}")
-                            # If connection fails, assume it's a disconnect (network drop)
-                            is_obs_streaming = True
-                    else:
-                        logger.warning("Could not connect to OBS. Assuming network drop.")
-                        is_obs_streaming = True
-
-                    if is_obs_streaming or self.cloud_brb_enabled:
-                        logger.error("Process of noalbs taking over: Source stream disconnected / dropped! Bitrate 0 kbps.")
-                        logger.warning(f"Switching OBS scene to {self.scene_brb} and starting Cloud BRB fallback.")
+                    logger.error("Process of noalbs taking over: Source stream disconnected / dropped! Bitrate 0 kbps.")
+                    self.is_low = True
+                    if self.fallback_mode == "video" or self.cloud_brb_enabled:
+                        # Immediately start video fallback without delay on disconnect
+                        self.start_cloud_brb()
                         self.switch_scene(self.scene_brb)
-                        self.is_low = True
-                        if self.cloud_brb_enabled:
-                            self.start_cloud_brb()
                     else:
-                        logger.info("Source stream ended cleanly.")
-                        self.is_low = False
+                        self.switch_scene(self.scene_brb)
                     self.is_streaming = False
 
             time.sleep(2)
