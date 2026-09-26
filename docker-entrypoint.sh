@@ -1,6 +1,8 @@
 #!/bin/bash
 set -e
 
+export SERVER_DOMAIN="${SERVER_DOMAIN:-localhost}"
+
 NGINX_TEMPLATE=/etc/nginx/nginx.conf.template
 NGINX_CONF=/etc/nginx/nginx.conf
 VALIDATOR_LOG=/tmp/validator.log
@@ -93,8 +95,9 @@ add_push() {
             sed -i "s|#${template_marker}| |g" $TMP_TEMPLATE
         else
             echo "${platform_name} activated."
-            # Correctly escape slashes in URLs for sed, use | as delimiter
-            local escaped_push="push ${push_url}${key_value};"
+            local full_push="push ${push_url}${key_value};"
+            local escaped_push
+            escaped_push=$(echo "$full_push" | sed 's/\\/\\\\/g; s/|/\\|/g; s/&/\\&/g')
             sed -i "s|#${template_marker}|${escaped_push}|g" $TMP_TEMPLATE
             ENV_OK=1
        fi
@@ -171,7 +174,7 @@ if [ -n "$SERVER_DOMAIN" ]; then
 fi
 
 # --- Certbot Renewal Loop ---
-if [ -n "$SERVER_DOMAIN" ]; then
+if [ -n "$SERVER_DOMAIN" ] && [ "$SERVER_DOMAIN" != "localhost" ]; then
     mkdir -p /var/www/certbot
     echo "Starting Certbot renewal background loop..."
     (
@@ -208,7 +211,7 @@ if [ -n "$SERVER_DOMAIN" ]; then
 fi
 
 # --- Start NOALBS ---
-if [ "${NOALBS_ENABLED}" = "true" ]; then
+if [ "$(echo "${NOALBS_ENABLED:-true}" | tr '[:upper:]' '[:lower:]')" = "true" ]; then
     echo "Starting NOALBS background process..."
     python3 /app/noalbs/noalbs.py 2>&1 | tee -a /tmp/noalbs.log &
 fi

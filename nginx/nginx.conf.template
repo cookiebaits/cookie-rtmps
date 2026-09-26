@@ -131,6 +131,7 @@ rtmp {
             live on;
             record off;
             on_publish http://127.0.0.1:8080/validate?key=$name;
+            on_publish_done http://127.0.0.1:8080/publish_done;
             push ${FACEBOOK_URL}${FACEBOOK_KEY};
         }
 
@@ -139,6 +140,7 @@ rtmp {
             live on;
             record off;
             on_publish http://127.0.0.1:8080/validate?key=$name;
+            on_publish_done http://127.0.0.1:8080/publish_done;
             push ${TWITCH_URL}${TWITCH_KEY};
         }
 
@@ -147,6 +149,7 @@ rtmp {
             live on;
             record off;
             on_publish http://127.0.0.1:8080/validate?key=$name;
+            on_publish_done http://127.0.0.1:8080/publish_done;
             push ${YOUTUBE_URL}${YOUTUBE_KEY};
         }
 
@@ -155,6 +158,7 @@ rtmp {
             live on;
             record off;
             on_publish http://127.0.0.1:8080/validate?key=$name;
+            on_publish_done http://127.0.0.1:8080/publish_done;
             push ${KICK_URL}${KICK_KEY};
         }
 
@@ -163,6 +167,7 @@ rtmp {
             live on;
             record off;
             on_publish http://127.0.0.1:8080/validate?key=$name;
+            on_publish_done http://127.0.0.1:8080/publish_done;
             push ${X_URL}${X_KEY};
         }
 
@@ -171,6 +176,7 @@ rtmp {
             live on;
             record off;
             on_publish http://127.0.0.1:8080/validate?key=$name;
+            on_publish_done http://127.0.0.1:8080/publish_done;
             
             #youtube
             #facebook
@@ -179,6 +185,10 @@ rtmp {
             #kick
             #x
             #twitch
+            #trovo
+            #rtmp1
+            #rtmp2
+            #rtmp3
         }
 
         # Vertical application
@@ -186,6 +196,7 @@ rtmp {
             live on;
             record off;
             on_publish http://127.0.0.1:8080/validate?key=$name;
+            on_publish_done http://127.0.0.1:8080/publish_done;
 
             #v_youtube
             #v_facebook
@@ -194,6 +205,7 @@ rtmp {
             #v_kick
             #v_x
             #v_twitch
+            #v_trovo
             #v_rtmp1
         }
     }

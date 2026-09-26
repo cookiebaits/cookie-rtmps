@@ -74,6 +74,7 @@ PORT_STATS="8081"
 
 # NOALBS Settings
 NOALBS_ENABLED="true"
+FALLBACK_MODE="video"
 OBS_WS_HOST="127.0.0.1"
 OBS_WS_PORT="4455"
 OBS_WS_PASSWORD=""
@@ -147,6 +148,7 @@ TWITCH_CLIENT_ID="$TWITCH_CLIENT_ID"
 TWITCH_OAUTH_TOKEN="$TWITCH_OAUTH_TOKEN"
 TWITCH_BROADCASTER_ID="$TWITCH_BROADCASTER_ID"
 NOALBS_ENABLED="$NOALBS_ENABLED"
+FALLBACK_MODE="$FALLBACK_MODE"
 OBS_WS_HOST="$OBS_WS_HOST"
 OBS_WS_PORT="$OBS_WS_PORT"
 OBS_WS_PASSWORD="$OBS_WS_PASSWORD"
@@ -978,8 +980,41 @@ ensure_brb_video_transcoded() {
     if [ -f "${target}.tmp" ] && [ -s "${target}.tmp" ]; then
         if command -v ffmpeg &> /dev/null; then
             echo -e "${YELLOW}Transcoding BRB video with FFmpeg to ensure AAC audio and H.264 video compatibility...${NC}"
-            ffmpeg -y -hide_banner -loglevel warning -i "${target}.tmp" -c:v libx264 -pix_fmt yuv420p -g 60 -c:a aac -ar 48000 -ac 2 "$target"
-            if [ $? -eq 0 ] && [ -s "$target" ]; then
+
+            local duration=""
+            if command -v ffprobe &> /dev/null; then
+                duration=$(ffprobe -v error -show_entries format=duration -of default=noprintwrappers=1:nokey=1 "${target}.tmp" 2>/dev/null || true)
+            fi
+            if [ -z "$duration" ] || [ "$(awk -v d="$duration" 'BEGIN { print (d > 0) ? 1 : 0 }' 2>/dev/null)" -ne 1 ]; then
+                local dur_str
+                dur_str=$(ffmpeg -i "${target}.tmp" 2>&1 | grep "Duration" | awk '{print $2}' | tr -d ',')
+                if [ -n "$dur_str" ]; then
+                    duration=$(echo "$dur_str" | awk -F: '{ print ($1 * 3600) + ($2 * 60) + $3 }')
+                fi
+            fi
+
+            ffmpeg -y -hide_banner -loglevel warning -i "${target}.tmp" -c:v libx264 -pix_fmt yuv420p -g 60 -c:a aac -ar 48000 -ac 2 -progress pipe:1 "$target" 2>/dev/null | while read -r line; do
+                if [[ "$line" == out_time_us=* ]]; then
+                    local us="${line#*=}"
+                    if [[ "$us" =~ ^[0-9]+$ ]] && [ -n "$duration" ]; then
+                        local pct
+                        pct=$(awk -v us="$us" -v dur="$duration" 'BEGIN { if (dur>0) { p=(us/1000000/dur)*100; if (p>100) p=100; printf "%.1f", p } else { print "0.0" } }')
+                        local filled
+                        filled=$(awk -v pct="$pct" 'BEGIN { printf "%d", (pct * 30 / 100) }')
+                        local unfilled=$((30 - filled))
+                        local bar=""
+                        for ((i=0; i<filled; i++)); do bar="${bar}="; done
+                        if [ $unfilled -gt 0 ]; then
+                            bar="${bar}>"
+                            for ((i=1; i<unfilled; i++)); do bar="${bar} "; done
+                        fi
+                        printf "\rTranscoding BRB Video: [%s] %s%%" "$bar" "$pct"
+                    fi
+                fi
+            done
+            echo ""
+
+            if [ -f "$target" ] && [ -s "$target" ]; then
                 echo -e "${GREEN}BRB video successfully downloaded and transcoded.${NC}"
                 rm -f "${target}.tmp"
             else
@@ -1002,17 +1037,18 @@ configure_noalbs() {
         echo -e "Status: $([ "$NOALBS_ENABLED" == "true" ] && echo -e "${GREEN}ENABLED${NC}" || echo -e "${RED}DISABLED${NC}")"
         echo ""
         echo "1) Toggle Enabled (Currently: $NOALBS_ENABLED)"
-        echo "2) OBS WebSocket Host (Current: $OBS_WS_HOST)"
-        echo "3) OBS WebSocket Port (Current: $OBS_WS_PORT)"
-        echo "4) OBS WebSocket Password (Current: ${OBS_WS_PASSWORD:-(None)})"
-        echo "5) Main/Live Scene Name (Current: $OBS_SCENE_LIVE)"
-        echo "6) BRB Scene Name (Current: $OBS_SCENE_BRB)"
-        echo "7) Low Bitrate Threshold (Current: $LOW_BITRATE kbps)"
-        echo "8) Restore Bitrate Threshold (Current: $RESTORE_BITRATE kbps)"
-        echo "9) Toggle Cloud BRB (Currently: $CLOUD_BRB)"
-        echo "10) Configure BRB Video URL (Current: ${BRB_VIDEO_URL:-(None)})"
-        echo "11) Disconnection Protection Duration (Current: ${CLOUD_BRB_TIMEOUT} seconds)"
-        echo "12) Back to Main Menu"
+        echo "2) Primary Fallback Mode (Current: ${FALLBACK_MODE:-video} [video = MP4, obs = OBS Scene Switch])"
+        echo "3) OBS WebSocket Host (Current: $OBS_WS_HOST)"
+        echo "4) OBS WebSocket Port (Current: $OBS_WS_PORT)"
+        echo "5) OBS WebSocket Password (Current: ${OBS_WS_PASSWORD:-(None)})"
+        echo "6) Main/Live Scene Name (Current: $OBS_SCENE_LIVE)"
+        echo "7) BRB Scene Name (Current: $OBS_SCENE_BRB)"
+        echo "8) Low Bitrate Threshold (Current: $LOW_BITRATE kbps)"
+        echo "9) Restore Bitrate Threshold (Current: $RESTORE_BITRATE kbps)"
+        echo "10) Toggle Cloud BRB (Currently: $CLOUD_BRB)"
+        echo "11) Configure BRB Video URL (Current: ${BRB_VIDEO_URL:-(None)})"
+        echo "12) Disconnection Protection Duration (Current: ${CLOUD_BRB_TIMEOUT} seconds)"
+        echo "13) Back to Main Menu"
         echo -e "Select an option: \c"
         read -r noalbs_opt
 
@@ -1022,46 +1058,56 @@ configure_noalbs() {
                 save_config
                 ;;
             2)
+                if [ "$FALLBACK_MODE" == "obs" ]; then
+                    FALLBACK_MODE="video"
+                else
+                    FALLBACK_MODE="obs"
+                fi
+                echo -e "${GREEN}Primary Fallback Mode switched to: $FALLBACK_MODE${NC}"
+                save_config
+                sleep 1
+                ;;
+            3)
                 echo -e "Enter OBS WebSocket Host (e.g. 192.168.1.50 or host.docker.internal):"
                 read -r input
                 if [ ! -z "$input" ]; then OBS_WS_HOST="$input"; save_config; fi
                 ;;
-            3)
+            4)
                 echo -e "Enter OBS WebSocket Port (Default: 4455):"
                 read -r input
                 if [ ! -z "$input" ]; then OBS_WS_PORT="$input"; save_config; fi
                 ;;
-            4)
+            5)
                 echo -e "Enter OBS WebSocket Password:"
                 read -r input
                 OBS_WS_PASSWORD="$input"
                 save_config
                 ;;
-            5)
+            6)
                 echo -e "Enter OBS Main Scene Name (e.g. 'Main' or 'Streaming'):"
                 read -r input
                 if [ ! -z "$input" ]; then OBS_SCENE_LIVE="$input"; save_config; fi
                 ;;
-            6)
+            7)
                 echo -e "Enter OBS BRB Scene Name (e.g. 'BRB' or 'LowBitrate'):"
                 read -r input
                 if [ ! -z "$input" ]; then OBS_SCENE_BRB="$input"; save_config; fi
                 ;;
-            7)
+            8)
                 echo -e "Enter Low Bitrate Threshold in kbps (e.g. 1000):"
                 read -r input
                 if [ ! -z "$input" ]; then LOW_BITRATE="$input"; save_config; fi
                 ;;
-            8)
+            9)
                 echo -e "Enter Restore Bitrate Threshold in kbps (e.g. 1500):"
                 read -r input
                 if [ ! -z "$input" ]; then RESTORE_BITRATE="$input"; save_config; fi
                 ;;
-            9)
+            10)
                 if [ "$CLOUD_BRB" == "true" ]; then CLOUD_BRB="false"; else CLOUD_BRB="true"; fi
                 save_config
                 ;;
-            10)
+            11)
                 echo -e "Enter BRB Video URL (Direct MP4 link, or type 'disable'/'clear' to remove):"
                 read -r input
                 if [ "$input" == "disable" ] || [ "$input" == "clear" ] || [ "$input" == "DISABLE" ] || [ "$input" == "CLEAR" ]; then
@@ -1077,7 +1123,7 @@ configure_noalbs() {
                     sleep 2
                 fi
                 ;;
-            11)
+            12)
                 echo -e "Enter Disconnection Video Protection Duration in seconds (e.g. 300):"
                 read -r input
                 if [ ! -z "$input" ]; then
@@ -1087,7 +1133,7 @@ configure_noalbs() {
                     sleep 1
                 fi
                 ;;
-            12) break ;;
+            13) break ;;
             *) echo -e "${RED}Invalid option${NC}" ; sleep 1 ;;
         esac
     done
@@ -1174,10 +1220,14 @@ build_and_run() {
     fi
 
     echo -e "${YELLOW}Stopping and removing any old container instances and associated Docker volumes...${NC}"
-    OLD_CONTAINERS=$(docker ps -a --format '{{.ID}} {{.Names}}' | grep -i rtmps | awk '{print $1}')
+    OLD_CONTAINERS=$(docker ps -a --format '{{.ID}} {{.Names}}' | grep -iE 'rtmp|cookie|prism' | awk '{print $1}')
     if [ ! -z "$OLD_CONTAINERS" ]; then
         docker stop $OLD_CONTAINERS 2>/dev/null || true
         docker rm -v -f $OLD_CONTAINERS 2>/dev/null || true
+    fi
+    OLD_VOLUMES=$(docker volume ls -q | grep -iE 'rtmp|cookie|prism' || true)
+    if [ ! -z "$OLD_VOLUMES" ]; then
+        docker volume rm -f $OLD_VOLUMES 2>/dev/null || true
     fi
 
     enable_bbr_and_tcp_optimizations
@@ -1340,6 +1390,7 @@ build_and_run() {
         -e TWITCH_BROADCASTER_ID="$TWITCH_BROADCASTER_ID" \
         -e SERVER_DOMAIN="$SERVER_DOMAIN" \
         -e NOALBS_ENABLED="$NOALBS_ENABLED" \
+        -e FALLBACK_MODE="$FALLBACK_MODE" \
         -e OBS_WS_HOST="$OBS_WS_HOST" \
         -e OBS_WS_PORT="$OBS_WS_PORT" \
         -e OBS_WS_PASSWORD="$OBS_WS_PASSWORD" \
@@ -1445,7 +1496,7 @@ stop_and_uninstall() {
         return
     fi
     echo -e "${YELLOW}Stopping services and performing complete removal...${NC}"
-    OLD_CONTAINERS=$(docker ps -a --format '{{.ID}} {{.Names}}' | grep -i rtmps | awk '{print $1}')
+    OLD_CONTAINERS=$(docker ps -a --format '{{.ID}} {{.Names}}' | grep -iE 'rtmp|cookie|prism' | awk '{print $1}')
     if [ ! -z "$OLD_CONTAINERS" ]; then
         docker stop $OLD_CONTAINERS 2>/dev/null && echo -e "${GREEN}Containers stopped.${NC}" || true
         docker rm -v -f $OLD_CONTAINERS 2>/dev/null && echo -e "${GREEN}Containers and volumes removed, ports unbound.${NC}" || true
@@ -1454,7 +1505,12 @@ stop_and_uninstall() {
         docker rm -v -f cookie-rtmps 2>/dev/null && echo -e "${GREEN}Container and volumes removed, ports unbound.${NC}" || true
     fi
 
-    OLD_IMAGES=$(docker images --format '{{.ID}} {{.Repository}}' | grep -i rtmps | awk '{print $1}')
+    OLD_VOLUMES=$(docker volume ls -q | grep -iE 'rtmp|cookie|prism' || true)
+    if [ ! -z "$OLD_VOLUMES" ]; then
+        docker volume rm -f $OLD_VOLUMES 2>/dev/null && echo -e "${GREEN}Matching Docker volumes removed.${NC}" || true
+    fi
+
+    OLD_IMAGES=$(docker images --format '{{.ID}} {{.Repository}}' | grep -iE 'rtmp|cookie|prism' | awk '{print $1}')
     if [ ! -z "$OLD_IMAGES" ]; then
         docker rmi -f $OLD_IMAGES 2>/dev/null && echo -e "${GREEN}Images removed.${NC}" || true
     else
