@@ -9,7 +9,7 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 # Default values
-YOUTUBE_URL="rtmp://x.rtmp.youtube.com/live2/"
+YOUTUBE_URL="rtmp://a.rtmp.youtube.com/live2/"
 YOUTUBE_KEY=""
 FACEBOOK_URL="rtmp://127.0.0.1:19350/rtmp/"
 FACEBOOK_KEY=""
@@ -32,7 +32,7 @@ RTMP1_URL=""
 RTMP1_KEY=""
 
 # Vertical Defaults
-V_YOUTUBE_URL="rtmp://x.rtmp.youtube.com/live2/"
+V_YOUTUBE_URL="rtmp://a.rtmp.youtube.com/live2/"
 V_YOUTUBE_KEY=""
 V_TWITCH_URL="rtmp://127.0.0.1:19353/app/"
 V_TWITCH_KEY=""
@@ -191,7 +191,7 @@ get_alternative_url() {
 
     case $platform in
         "youtube")
-            if [[ "$current_url" == *"x.rtmp.youtube.com"* ]] || [[ "$current_url" == *"127.0.0.1:19355"* ]]; then
+            if [[ "$current_url" == *"x.rtmp.youtube.com"* ]] || [[ "$current_url" == *"a.rtmp.youtube.com"* ]] || [[ "$current_url" == *"127.0.0.1:19355"* ]]; then
                 # It is a primary URL, return the corresponding backup URL
                 if [[ "$current_url" == *"127.0.0.1"* ]]; then
                     echo "rtmp://127.0.0.1:19357/live2?backup=1"
@@ -203,7 +203,7 @@ get_alternative_url() {
                 if [[ "$current_url" == *"127.0.0.1"* ]]; then
                     echo "rtmp://127.0.0.1:19355/live2/"
                 else
-                    echo "rtmp://x.rtmp.youtube.com/live2/"
+                    echo "rtmp://a.rtmp.youtube.com/live2/"
                 fi
             fi
             ;;
@@ -252,7 +252,7 @@ configure_keys() {
             1)
                prompt_for_key "YouTube Key" "YOUTUBE_KEY"
                echo -e "Select YouTube Server:"
-               echo "  1) Primary (rtmp://x.rtmp.youtube.com/live2/)"
+               echo "  1) Primary (rtmp://a.rtmp.youtube.com/live2/)"
                echo "  2) Backup (rtmp://b.rtmp.youtube.com/live2?backup=1)"
                echo "  3) Secure Primary (rtmps://a.rtmps.youtube.com/live2/ -> via Stunnel)"
                echo "  4) Secure Backup (rtmps://b.rtmps.youtube.com/live2?backup=1 -> via Stunnel)"
@@ -260,7 +260,7 @@ configure_keys() {
                echo -e "Option (Current URL: $YOUTUBE_URL): \c"
                read -r y_opt
                case $y_opt in
-                   1) YOUTUBE_URL="rtmp://x.rtmp.youtube.com/live2/" ;;
+                   1) YOUTUBE_URL="rtmp://a.rtmp.youtube.com/live2/" ;;
                    2) YOUTUBE_URL="rtmp://b.rtmp.youtube.com/live2?backup=1" ;;
                    3) YOUTUBE_URL="rtmp://127.0.0.1:19355/live2/" ;;
                    4) YOUTUBE_URL="rtmp://127.0.0.1:19357/live2?backup=1" ;;
@@ -285,12 +285,14 @@ configure_keys() {
                echo "  6) EU: Ireland (rtmp://euw10.contribute.live-video.net/app/)"
                echo "  7) EU: Frankfurt (rtmp://euc10.contribute.live-video.net/app/)"
                echo "  8) EU: Paris (rtmp://euw30.contribute.live-video.net/app/)"
-               echo "  9) Asia: Tokyo (rtmp://apn10.contribute.live-video.net/app/)"
-               echo "  10) Asia: Seoul (rtmp://apn20.contribute.live-video.net/app/)"
-               echo "  11) Asia: Singapore (rtmp://aps10.contribute.live-video.net/app/)"
-               echo "  12) Asia: Sydney (rtmp://aps20.contribute.live-video.net/app/)"
-               echo "  13) South America: Brazil (rtmp://sae10.contribute.live-video.net/app/)"
-               echo "  14) Custom URL"
+               echo "  9) EU: Stockholm (rtmp://eun10.contribute.live-video.net/app/)"
+               echo "  10) Asia: Tokyo (rtmp://apn10.contribute.live-video.net/app/)"
+               echo "  11) Asia: Seoul (rtmp://apn20.contribute.live-video.net/app/)"
+               echo "  12) Asia: Singapore (rtmp://aps10.contribute.live-video.net/app/)"
+               echo "  13) Asia: Sydney (rtmp://aps20.contribute.live-video.net/app/)"
+               echo "  14) Asia: Mumbai (rtmp://aps30.contribute.live-video.net/app/)"
+               echo "  15) South America: Brazil (rtmp://sae10.contribute.live-video.net/app/)"
+               echo "  16) Custom URL"
                echo -e "Option (Current URL: $TWITCH_URL): \c"
                read -r t_opt
                case $t_opt in
@@ -302,12 +304,14 @@ configure_keys() {
                    6) TWITCH_URL="rtmp://euw10.contribute.live-video.net/app/" ;;
                    7) TWITCH_URL="rtmp://euc10.contribute.live-video.net/app/" ;;
                    8) TWITCH_URL="rtmp://euw30.contribute.live-video.net/app/" ;;
-                   9) TWITCH_URL="rtmp://apn10.contribute.live-video.net/app/" ;;
-                   10) TWITCH_URL="rtmp://apn20.contribute.live-video.net/app/" ;;
-                   11) TWITCH_URL="rtmp://aps10.contribute.live-video.net/app/" ;;
-                   12) TWITCH_URL="rtmp://aps20.contribute.live-video.net/app/" ;;
-                   13) TWITCH_URL="rtmp://sae10.contribute.live-video.net/app/" ;;
-                   14)
+                   9) TWITCH_URL="rtmp://eun10.contribute.live-video.net/app/" ;;
+                   10) TWITCH_URL="rtmp://apn10.contribute.live-video.net/app/" ;;
+                   11) TWITCH_URL="rtmp://apn20.contribute.live-video.net/app/" ;;
+                   12) TWITCH_URL="rtmp://aps10.contribute.live-video.net/app/" ;;
+                   13) TWITCH_URL="rtmp://aps20.contribute.live-video.net/app/" ;;
+                   14) TWITCH_URL="rtmp://aps30.contribute.live-video.net/app/" ;;
+                   15) TWITCH_URL="rtmp://sae10.contribute.live-video.net/app/" ;;
+                   16)
                       echo -e "Enter Custom Twitch Server URL: "
                       read -r t_url
                       if [ ! -z "$t_url" ]; then
@@ -343,7 +347,7 @@ configure_keys() {
             4)
                prompt_for_key "TikTok" "TIKTOK_KEY"
                echo -e "Select TikTok Server:"
-               echo "  1) Secure (rtmps://push-rtmp-f5-ap-southeast-1.tiktokcdn.com:443 -> via Stunnel)"
+               echo "  1) Secure (rtmps://push.tiktok.com:443 -> via Stunnel)"
                echo "  2) Custom URL"
                echo "  3) Streamlabs Auto-Pusher (Bypass TikTok Studio)"
                echo -e "Option (Current URL: $TIKTOK_URL): \c"
@@ -483,13 +487,13 @@ configure_vertical_keys() {
             1)
                prompt_for_key "YouTube Vertical Key" "V_YOUTUBE_KEY"
                echo -e "Select YouTube Server:"
-               echo "  1) Primary (rtmp://x.rtmp.youtube.com/live2/)"
+               echo "  1) Primary (rtmp://a.rtmp.youtube.com/live2/)"
                echo "  2) Secure Primary (rtmps://a.rtmps.youtube.com/live2/ -> via Stunnel)"
                echo "  3) Custom URL"
                echo -e "Option (Current URL: $V_YOUTUBE_URL): \c"
                read -r y_opt
                case $y_opt in
-                   1) V_YOUTUBE_URL="rtmp://x.rtmp.youtube.com/live2/" ;;
+                   1) V_YOUTUBE_URL="rtmp://a.rtmp.youtube.com/live2/" ;;
                    2) V_YOUTUBE_URL="rtmp://127.0.0.1:19355/live2/" ;;
                    3)
                       echo -e "Enter Custom YouTube Server URL: "
@@ -518,12 +522,14 @@ configure_vertical_keys() {
                echo "  6) EU: Ireland (rtmp://euw10.contribute.live-video.net/app/)"
                echo "  7) EU: Frankfurt (rtmp://euc10.contribute.live-video.net/app/)"
                echo "  8) EU: Paris (rtmp://euw30.contribute.live-video.net/app/)"
-               echo "  9) Asia: Tokyo (rtmp://apn10.contribute.live-video.net/app/)"
-               echo "  10) Asia: Seoul (rtmp://apn20.contribute.live-video.net/app/)"
-               echo "  11) Asia: Singapore (rtmp://aps10.contribute.live-video.net/app/)"
-               echo "  12) Asia: Sydney (rtmp://aps20.contribute.live-video.net/app/)"
-               echo "  13) South America: Brazil (rtmp://sae10.contribute.live-video.net/app/)"
-               echo "  14) Custom URL"
+               echo "  9) EU: Stockholm (rtmp://eun10.contribute.live-video.net/app/)"
+               echo "  10) Asia: Tokyo (rtmp://apn10.contribute.live-video.net/app/)"
+               echo "  11) Asia: Seoul (rtmp://apn20.contribute.live-video.net/app/)"
+               echo "  12) Asia: Singapore (rtmp://aps10.contribute.live-video.net/app/)"
+               echo "  13) Asia: Sydney (rtmp://aps20.contribute.live-video.net/app/)"
+               echo "  14) Asia: Mumbai (rtmp://aps30.contribute.live-video.net/app/)"
+               echo "  15) South America: Brazil (rtmp://sae10.contribute.live-video.net/app/)"
+               echo "  16) Custom URL"
                echo -e "Option (Current URL: $V_TWITCH_URL): \c"
                read -r t_opt
                case $t_opt in
@@ -535,12 +541,14 @@ configure_vertical_keys() {
                    6) V_TWITCH_URL="rtmp://euw10.contribute.live-video.net/app/" ;;
                    7) V_TWITCH_URL="rtmp://euc10.contribute.live-video.net/app/" ;;
                    8) V_TWITCH_URL="rtmp://euw30.contribute.live-video.net/app/" ;;
-                   9) V_TWITCH_URL="rtmp://apn10.contribute.live-video.net/app/" ;;
-                   10) V_TWITCH_URL="rtmp://apn20.contribute.live-video.net/app/" ;;
-                   11) V_TWITCH_URL="rtmp://aps10.contribute.live-video.net/app/" ;;
-                   12) V_TWITCH_URL="rtmp://aps20.contribute.live-video.net/app/" ;;
-                   13) V_TWITCH_URL="rtmp://sae10.contribute.live-video.net/app/" ;;
-                   14)
+                   9) V_TWITCH_URL="rtmp://eun10.contribute.live-video.net/app/" ;;
+                   10) V_TWITCH_URL="rtmp://apn10.contribute.live-video.net/app/" ;;
+                   11) V_TWITCH_URL="rtmp://apn20.contribute.live-video.net/app/" ;;
+                   12) V_TWITCH_URL="rtmp://aps10.contribute.live-video.net/app/" ;;
+                   13) V_TWITCH_URL="rtmp://aps20.contribute.live-video.net/app/" ;;
+                   14) V_TWITCH_URL="rtmp://aps30.contribute.live-video.net/app/" ;;
+                   15) V_TWITCH_URL="rtmp://sae10.contribute.live-video.net/app/" ;;
+                   16)
                       echo -e "Enter Custom Twitch Server URL: "
                       read -r t_url
                       if [ ! -z "$t_url" ]; then
@@ -588,7 +596,7 @@ configure_vertical_keys() {
             4)
                prompt_for_key "TikTok Vertical Key" "V_TIKTOK_KEY"
                echo -e "Select TikTok Server:"
-               echo "  1) Secure (rtmps://push-rtmp-f5-ap-southeast-1.tiktokcdn.com:443 -> via Stunnel)"
+               echo "  1) Secure (rtmps://push.tiktok.com:443 -> via Stunnel)"
                echo "  2) Custom URL"
                echo "  3) Streamlabs Auto-Pusher (Bypass TikTok Studio)"
                echo -e "Option (Current URL: $V_TIKTOK_URL): \c"
