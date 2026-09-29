@@ -43,6 +43,15 @@ class Noalbs:
         self.is_streaming = False
         self.obs_client = None
 
+        # Detect NVENC support once at init to avoid delay when triggering Cloud BRB
+        self.has_nvenc = False
+        try:
+            res = subprocess.run(["ffmpeg", "-encoders"], capture_output=True, text=True, timeout=5)
+            if "h264_nvenc" in res.stdout:
+                self.has_nvenc = True
+        except Exception:
+            self.has_nvenc = False
+
     def ensure_brb_video_ready(self):
         default_url = "https://filedn.com/lfh40bKbFfD5um9HDFNrJFR/brb.mp4"
         video_url = os.getenv("BRB_VIDEO_URL", "").strip() or default_url
@@ -178,16 +187,7 @@ class Noalbs:
         if not self.cloud_brb_start_time:
             self.cloud_brb_start_time = time.time()
 
-        # Check for NVENC encoder support
-        has_nvenc = False
-        try:
-            res = subprocess.run(["ffmpeg", "-encoders"], capture_output=True, text=True, timeout=5)
-            if "h264_nvenc" in res.stdout:
-                has_nvenc = True
-        except Exception:
-            pass
-
-        if has_nvenc:
+        if self.has_nvenc:
             vcodec = ["-c:v", "h264_nvenc", "-preset", "p3", "-tune", "ll"]
         else:
             vcodec = ["-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency"]
@@ -196,10 +196,11 @@ class Noalbs:
 
         cmd = [
             "ffmpeg", "-hide_banner", "-loglevel", "warning",
+            "-fflags", "+nobuffer", "-flags", "+low_delay",
             "-re", "-thread_queue_size", "1024",
             "-stream_loop", "-1", "-i", self.brb_video_path,
             *vcodec,
-            "-b:v", "3000k", "-maxrate", "3000k", "-bufsize", "6000k",
+            "-b:v", "3000k", "-maxrate", "3000k", "-bufsize", "3000k",
             "-g", "60", "-keyint_min", "60", "-sc_threshold", "0",
             "-c:a", "aac", "-ac", "2", "-ar", "48000", "-b:a", "160k",
             "-max_muxing_queue_size", "1024",
@@ -317,7 +318,7 @@ class Noalbs:
                         self.switch_scene(self.scene_brb)
                     self.is_streaming = False
 
-            time.sleep(2)
+            time.sleep(1)
 
 if __name__ == "__main__":
     Noalbs().run()

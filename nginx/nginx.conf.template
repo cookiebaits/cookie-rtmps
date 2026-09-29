@@ -120,6 +120,11 @@ rtmp {
         listen 19352;
         chunk_size ${CHUNK_SIZE};
 
+        # Throughput and Buffer Optimization for Upload Speeds
+        max_message 10M;
+        out_queue 4096;
+        out_cork 8;
+
         # Stability and Security Enhancements
         ping 30s;
         ping_timeout 10s;

@@ -1237,6 +1237,7 @@ build_and_run() {
     if [ ! -z "$OLD_VOLUMES" ]; then
         docker volume rm -f $OLD_VOLUMES 2>/dev/null || true
     fi
+    deep_cleanup_ports_and_processes
 
     enable_bbr_and_tcp_optimizations
 
@@ -1497,6 +1498,27 @@ view_logs() {
     done
 }
 
+deep_cleanup_ports_and_processes() {
+    echo -e "${YELLOW}Cleaning up host processes and freeing ports (1935, 8443, 8081, 19350-19358)...${NC}"
+    local PORTS=(1935 8443 8081 19350 19351 19352 19353 19354 19355 19356 19357 19358)
+    for port in "${PORTS[@]}"; do
+        if command -v fuser &> /dev/null; then
+            fuser -k -9 "${port}/tcp" 2>/dev/null || true
+        elif command -v lsof &> /dev/null; then
+            local pids
+            pids=$(lsof -t -i :"$port" 2>/dev/null || true)
+            if [ -n "$pids" ]; then
+                kill -9 $pids 2>/dev/null || true
+            fi
+        fi
+    done
+
+    # Terminate any leftover host processes if any were spawned outside container
+    pkill -f "tiktok_pusher.py" 2>/dev/null || true
+    pkill -f "noalbs.py" 2>/dev/null || true
+    pkill -f "stream_validator" 2>/dev/null || true
+}
+
 stop_and_uninstall() {
     if ! command -v docker &> /dev/null; then
         echo -e "${RED}Docker is not installed!${NC}"
@@ -1525,7 +1547,11 @@ stop_and_uninstall() {
         docker rmi -f cookie-rtmps 2>/dev/null && echo -e "${GREEN}Image removed.${NC}" || true
     fi
 
-    echo -e "${YELLOW}Pruning Docker build cache and unused images...${NC}"
+    deep_cleanup_ports_and_processes
+
+    echo -e "${YELLOW}Pruning Docker build cache, volumes, networks, and unused images...${NC}"
+    docker volume prune -f 2>/dev/null || true
+    docker network prune -f 2>/dev/null || true
     docker image prune -a -f 2>/dev/null || true
     docker builder prune -a -f 2>/dev/null || true
     docker system prune -a -f 2>/dev/null || true
