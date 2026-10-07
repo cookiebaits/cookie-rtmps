@@ -22,6 +22,7 @@ stream {
     server {
         listen 1935;
         proxy_pass $backend_name;
+        proxy_protocol on;
         ssl_preread on;
     }
 }
@@ -58,7 +59,12 @@ http {
             root /var/www/certbot;
         }
 
-        # Redirect all HTTP traffic to HTTPS if domain is set
+        # Serve static chat.html directly
+        location = /chat.html {
+            root /usr/local/nginx/html;
+        }
+
+        # Redirect all other HTTP traffic to HTTPS if domain is set
         location / {
             if ($host = ${SERVER_DOMAIN}) {
                 return 301 https://$host$request_uri;
@@ -96,6 +102,10 @@ http {
             root /usr/local/nginx/html;
         }
 
+        location = /chat.html {
+            root /usr/local/nginx/html;
+        }
+
         location / {
             root /usr/local/nginx/html;
             index index.html;
@@ -116,8 +126,98 @@ http {
 }
 
 rtmp {
+    # Internal Cloud BRB / Local publishing server
     server {
-        listen 19352;
+        listen 19359;
+        chunk_size ${CHUNK_SIZE};
+
+        # Facebook Application
+        application facebook {
+            live on;
+            record off;
+            on_publish http://127.0.0.1:8080/validate?key=$name;
+            on_publish_done http://127.0.0.1:8080/publish_done;
+            push ${FACEBOOK_URL}${FACEBOOK_KEY};
+        }
+
+        # Twitch Application
+        application twitch {
+            live on;
+            record off;
+            on_publish http://127.0.0.1:8080/validate?key=$name;
+            on_publish_done http://127.0.0.1:8080/publish_done;
+            push ${TWITCH_URL}${TWITCH_KEY};
+        }
+
+        # YouTube Application
+        application youtube {
+            live on;
+            record off;
+            on_publish http://127.0.0.1:8080/validate?key=$name;
+            on_publish_done http://127.0.0.1:8080/publish_done;
+            push ${YOUTUBE_URL}${YOUTUBE_KEY};
+        }
+
+        # Kick Application
+        application kick {
+            live on;
+            record off;
+            on_publish http://127.0.0.1:8080/validate?key=$name;
+            on_publish_done http://127.0.0.1:8080/publish_done;
+            push ${KICK_URL}${KICK_KEY};
+        }
+
+        # X Application
+        application x {
+            live on;
+            record off;
+            on_publish http://127.0.0.1:8080/validate?key=$name;
+            on_publish_done http://127.0.0.1:8080/publish_done;
+            push ${X_URL}${X_KEY};
+        }
+
+        # Generic live application
+        application ${APP_NAME} {
+            live on;
+            record off;
+            on_publish http://127.0.0.1:8080/validate?key=$name;
+            on_publish_done http://127.0.0.1:8080/publish_done;
+
+            #youtube
+            #facebook
+            #instagram
+            #tiktok
+            #kick
+            #x
+            #twitch
+            #trovo
+            #rtmp1
+            #rtmp2
+            #rtmp3
+        }
+
+        # Vertical application
+        application vertical {
+            live on;
+            record off;
+            on_publish http://127.0.0.1:8080/validate?key=$name;
+            on_publish_done http://127.0.0.1:8080/publish_done;
+
+            #v_youtube
+            #v_facebook
+            #v_instagram
+            #v_tiktok
+            #v_kick
+            #v_x
+            #v_twitch
+            #v_trovo
+            #v_rtmp1
+        }
+    }
+
+    # External Stream server (receives PROXY protocol from stream block on 1935)
+    server {
+        listen 19352 proxy_protocol;
         chunk_size ${CHUNK_SIZE};
 
         # Throughput and Buffer Optimization for Upload Speeds

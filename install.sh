@@ -69,7 +69,7 @@ CHAT_TIKTOK=""
 
 # Host Port Settings
 PORT_RTMP="1935"
-PORT_HTTP="8443"
+PORT_HTTP="80"
 PORT_STATS="8081"
 
 # NOALBS Settings

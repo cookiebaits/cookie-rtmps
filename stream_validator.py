@@ -59,9 +59,6 @@ def is_ip_allowed(client_ip_str, accepted_ip_setting):
         return True
     try:
         client_ip = ipaddress.ip_address(client_ip_str)
-        # Always permit loopback addresses (127.0.0.1)
-        if client_ip.is_loopback:
-            return True
 
         for item in accepted_ip_setting.split(','):
             item = item.strip()
@@ -135,15 +132,15 @@ def validate():
     if not client_ip or client_ip == '127.0.0.1':
         client_ip = parsed_data.get('addr', [request.remote_addr])[0]
 
-    # IP Whitelist Check
-    if ACCEPTED_IP and not is_ip_allowed(client_ip, ACCEPTED_IP):
-        app.logger.warning(f"REJECTED IP: {client_ip}")
-        return Response('IP not whitelisted', status=403)
-
-    # Key Check
+    # Key Check - Internal Cloud BRB stream is always allowed
     if stream_key_attempt.startswith('cloud_brb'):
         app.logger.info(f"ACCEPTED cloud_brb stream from {client_ip} (Key: {stream_key_attempt})")
         return Response('OK', status=200)
+
+    # IP Whitelist Check for external streams
+    if ACCEPTED_IP and not is_ip_allowed(client_ip, ACCEPTED_IP):
+        app.logger.warning(f"REJECTED IP: {client_ip}")
+        return Response('IP not whitelisted', status=403)
 
     if not VALID_KEYS:
         return Response('No keys configured', status=403)

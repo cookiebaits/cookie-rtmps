@@ -129,8 +129,8 @@ class TestNoalbsComprehensive(unittest.TestCase):
         self.assertIn("-map", cmd)
         self.assertIn("0:a?", cmd)
         tee_target = cmd[-1]
-        self.assertIn("rtmp://127.0.0.1:19352/live/cloud_brb_loop", tee_target)
-        self.assertIn("rtmp://127.0.0.1:19352/vertical/cloud_brb_loop", tee_target)
+        self.assertIn("rtmp://127.0.0.1:19359/live/cloud_brb_loop", tee_target)
+        self.assertIn("rtmp://127.0.0.1:19359/vertical/cloud_brb_loop", tee_target)
 
     @patch("noalbs.noalbs.is_valid_file", return_value=True)
     @patch("subprocess.Popen")
