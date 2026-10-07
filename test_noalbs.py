@@ -163,11 +163,12 @@ class TestNoalbsComprehensive(unittest.TestCase):
         noalbs.start_cloud_brb()
         mock_ensure.assert_called_once()
 
-    @patch("noalbs.noalbs.urllib.request.urlretrieve")
+    @patch("noalbs.noalbs.urllib.request.urlopen")
+    @patch("builtins.open")
     @patch("subprocess.Popen")
     @patch("subprocess.run")
     @patch("noalbs.noalbs.is_valid_file")
-    def test_ensure_brb_video_ready_downloads_default_and_transcodes(self, mock_is_valid, mock_run, mock_popen, mock_urlretrieve):
+    def test_ensure_brb_video_ready_downloads_default_and_transcodes(self, mock_is_valid, mock_run, mock_popen, mock_open, mock_urlopen):
         # File missing initially (False), then present after download/transcode (True)
         mock_is_valid.side_effect = [False, True, True, True]
         mock_run.return_value = MagicMock(returncode=0, stdout="10.0")
@@ -176,12 +177,16 @@ class TestNoalbsComprehensive(unittest.TestCase):
         mock_proc.stdout = ["out_time_us=5000000"]
         mock_popen.return_value = mock_proc
 
+        mock_response = MagicMock()
+        mock_response.read.return_value = b"fake video content"
+        mock_urlopen.return_value.__enter__.return_value = mock_response
+
         noalbs = Noalbs()
         noalbs.ensure_brb_video_ready()
 
-        mock_urlretrieve.assert_called_once()
-        downloaded_url = mock_urlretrieve.call_args[0][0]
-        self.assertEqual(downloaded_url, "https://filedn.com/lfh40bKbFfD5um9HDFNrJFR/brb.mp4")
+        mock_urlopen.assert_called_once()
+        req_arg = mock_urlopen.call_args[0][0]
+        self.assertEqual(req_arg.full_url, "https://filedn.com/lfh40bKbFfD5um9HDFNrJFR/brb.mp4")
 
         # Verify FFmpeg transcode call included AAC audio and H.264
         mock_popen.assert_called_once()

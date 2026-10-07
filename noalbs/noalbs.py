@@ -63,7 +63,12 @@ class Noalbs:
             logger.info(f"BRB video missing. Downloading default video from {video_url}...")
             try:
                 tmp_path = target_path + ".tmp"
-                urllib.request.urlretrieve(video_url, tmp_path)
+                req = urllib.request.Request(
+                    video_url,
+                    headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+                )
+                with urllib.request.urlopen(req, timeout=60) as response, open(tmp_path, 'wb') as out_file:
+                    out_file.write(response.read())
                 logger.info(f"Downloaded video to {tmp_path}")
 
                 # Transcode and verify compatibility using FFmpeg (H.264 + AAC 48kHz stereo)
@@ -300,11 +305,12 @@ class Noalbs:
                         else:
                             self.switch_scene(self.scene_brb)
                 else:
-                    self.stop_cloud_brb()
-                    if bitrate >= self.restore_threshold and self.is_low:
-                        logger.info(f"Bitrate restored ({bitrate}kbps). Switching OBS scene to {self.scene_main}")
-                        self.switch_scene(self.scene_main)
-                        self.is_low = False
+                    if bitrate >= self.restore_threshold:
+                        self.stop_cloud_brb()
+                        if self.is_low:
+                            logger.info(f"Bitrate restored ({bitrate}kbps). Switching OBS scene to {self.scene_main}")
+                            self.switch_scene(self.scene_main)
+                            self.is_low = False
             else:
                 consecutive_low = 0
                 if self.is_streaming:

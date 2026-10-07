@@ -141,13 +141,15 @@ def validate():
         return Response('IP not whitelisted', status=403)
 
     # Key Check
+    if stream_key_attempt.startswith('cloud_brb'):
+        app.logger.info(f"ACCEPTED cloud_brb stream from {client_ip} (Key: {stream_key_attempt})")
+        return Response('OK', status=200)
+
     if not VALID_KEYS:
         return Response('No keys configured', status=403)
 
-    if stream_key_attempt in VALID_KEYS or stream_key_attempt.startswith('cloud_brb'):
+    if stream_key_attempt in VALID_KEYS:
         app.logger.info(f"ACCEPTED stream from {client_ip} (Key: {stream_key_attempt})")
-        if stream_key_attempt.startswith('cloud_brb'):
-            return Response('OK', status=200)
 
         # Update titles in background to not block Nginx
         threading.Thread(target=run_update_titles).start()
