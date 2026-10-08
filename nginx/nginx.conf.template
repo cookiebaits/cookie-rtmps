@@ -64,6 +64,12 @@ http {
             root /usr/local/nginx/html;
         }
 
+        location /yt_video_id {
+            proxy_pass http://127.0.0.1:8080/yt_video_id;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+        }
+
         # Redirect all other HTTP traffic to HTTPS if domain is set
         location / {
             if ($host = ${SERVER_DOMAIN}) {
@@ -104,6 +110,12 @@ http {
 
         location = /chat.html {
             root /usr/local/nginx/html;
+        }
+
+        location /yt_video_id {
+            proxy_pass http://127.0.0.1:8080/yt_video_id;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
         }
 
         location / {

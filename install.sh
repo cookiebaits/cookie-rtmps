@@ -752,8 +752,8 @@ configure_obs() {
     echo ""
     echo -e "--- Combined Chat ---"
     echo -e "You can use the combined chat as a browser source in OBS:"
-    echo -e "  ${YELLOW}URL:${NC} http://${DISPLAY_HOST}/chat.html?twitch=YOUR_CHANNEL&youtube=YOUR_VIDEO_ID"
-    echo -e "  (Replace YOUR_CHANNEL and YOUR_VIDEO_ID as needed)"
+    echo -e "  ${YELLOW}URL:${NC} http://${DISPLAY_HOST}/chat.html?twitch=YOUR_CHANNEL&youtube=YOUR_CHANNEL"
+    echo -e "  (Replace YOUR_CHANNEL as needed)"
     echo ""
     echo -e "--- Security Key ---"
     echo -e "CookieRTMPS requires a matching stream key to accept your stream."
@@ -920,10 +920,10 @@ configure_chat() {
     while true; do
         clear
         echo -e "${GREEN}=== Combined Chat Configuration ===${NC}"
-        echo "Enter Channel Names/IDs for browser source embeds:"
+        echo "Enter Channel Names for browser source embeds:"
         echo ""
         echo "1) Twitch Channel (Current: ${CHAT_TWITCH:-None})"
-        echo "2) YouTube Video ID (Current: ${CHAT_YOUTUBE:-None})"
+        echo "2) YouTube Channel (Current: ${CHAT_YOUTUBE:-None})"
         echo "3) Kick Channel (Current: ${CHAT_KICK:-None})"
         echo "4) TikTok Channel (Current: ${CHAT_TIKTOK:-None})"
         echo "5) Show Browser Source URL"
@@ -939,7 +939,7 @@ configure_chat() {
                 save_config
                 ;;
             2)
-                echo -e "Enter YouTube Video ID (from URL v=XXXX):"
+                echo -e "Enter YouTube Channel Name or Handle (e.g. cookiebaits or @cookiebaits):"
                 read -r chat_input
                 CHAT_YOUTUBE="$chat_input"
                 save_config
@@ -1499,14 +1499,23 @@ view_logs() {
 }
 
 deep_cleanup_ports_and_processes() {
-    echo -e "${YELLOW}Cleaning up host processes and freeing ports (1935, 8443, 8081, 19350-19358)...${NC}"
-    local PORTS=(1935 8443 8081 19350 19351 19352 19353 19354 19355 19356 19357 19358)
+    echo -e "${YELLOW}Cleaning up host processes and unbinding all ports (1935, 80, 8080, 8081, 8443, 19350-19359)...${NC}"
+    local PORTS=("$PORT_RTMP" "$PORT_HTTP" "$PORT_STATS" 80 8080 8081 1935 8443 19350 19351 19352 19353 19354 19355 19356 19357 19358 19359)
     for port in "${PORTS[@]}"; do
         if command -v fuser &> /dev/null; then
             fuser -k -9 "${port}/tcp" 2>/dev/null || true
-        elif command -v lsof &> /dev/null; then
+            fuser -k -9 "${port}/udp" 2>/dev/null || true
+        fi
+        if command -v lsof &> /dev/null; then
             local pids
             pids=$(lsof -t -i :"$port" 2>/dev/null || true)
+            if [ -n "$pids" ]; then
+                kill -9 $pids 2>/dev/null || true
+            fi
+        fi
+        if command -v ss &> /dev/null; then
+            local pids
+            pids=$(ss -lptn "sport = :$port" 2>/dev/null | grep -oP 'pid=\K\d+' | sort -u || true)
             if [ -n "$pids" ]; then
                 kill -9 $pids 2>/dev/null || true
             fi
@@ -1517,6 +1526,9 @@ deep_cleanup_ports_and_processes() {
     pkill -f "tiktok_pusher.py" 2>/dev/null || true
     pkill -f "noalbs.py" 2>/dev/null || true
     pkill -f "stream_validator" 2>/dev/null || true
+    pkill -f "gunicorn" 2>/dev/null || true
+    pkill -f "stunnel" 2>/dev/null || true
+    pkill -f "nginx" 2>/dev/null || true
 }
 
 stop_and_uninstall() {
@@ -1525,15 +1537,18 @@ stop_and_uninstall() {
         sleep 2
         return
     fi
-    echo -e "${YELLOW}Stopping services and performing complete removal...${NC}"
+    echo -e "${YELLOW}Stopping services, unbinding all ports, and performing complete removal...${NC}"
     OLD_CONTAINERS=$(docker ps -a --format '{{.ID}} {{.Names}}' | grep -iE 'rtmp|cookie|prism' | awk '{print $1}')
     if [ ! -z "$OLD_CONTAINERS" ]; then
         docker stop $OLD_CONTAINERS 2>/dev/null && echo -e "${GREEN}Containers stopped.${NC}" || true
-        docker rm -v -f $OLD_CONTAINERS 2>/dev/null && echo -e "${GREEN}Containers and volumes removed, ports unbound.${NC}" || true
+        docker rm -v -f $OLD_CONTAINERS 2>/dev/null && echo -e "${GREEN}Containers and volumes removed.${NC}" || true
     else
         docker stop cookie-rtmps 2>/dev/null && echo -e "${GREEN}Container stopped.${NC}" || echo -e "${RED}Container not running.${NC}"
-        docker rm -v -f cookie-rtmps 2>/dev/null && echo -e "${GREEN}Container and volumes removed, ports unbound.${NC}" || true
+        docker rm -v -f cookie-rtmps 2>/dev/null && echo -e "${GREEN}Container and volumes removed.${NC}" || true
     fi
+
+    echo -e "${YELLOW}Unbinding all ports and killing associated processes...${NC}"
+    deep_cleanup_ports_and_processes
 
     OLD_VOLUMES=$(docker volume ls -q | grep -iE 'rtmp|cookie|prism' || true)
     if [ ! -z "$OLD_VOLUMES" ]; then
@@ -1547,8 +1562,6 @@ stop_and_uninstall() {
         docker rmi -f cookie-rtmps 2>/dev/null && echo -e "${GREEN}Image removed.${NC}" || true
     fi
 
-    deep_cleanup_ports_and_processes
-
     echo -e "${YELLOW}Pruning Docker build cache, volumes, networks, and unused images...${NC}"
     docker volume prune -f 2>/dev/null || true
     docker network prune -f 2>/dev/null || true
@@ -1561,7 +1574,7 @@ stop_and_uninstall() {
     rm -rf ./data
     echo -e "${GREEN}Local configuration and data removed.${NC}"
 
-    echo -e "${GREEN}CookieRTMPS and all cached components have been completely removed.${NC}"
+    echo -e "${GREEN}CookieRTMPS and all cached components have been completely uninstalled and all ports unbound.${NC}"
     sleep 3
 }
 
@@ -1578,7 +1591,7 @@ while true; do
     echo -e "  RTMP Ingest:     rtmp://${DISPLAY_HOST}:${PORT_RTMP}/${APP_NAME}"
     echo -e "  Vertical Ingest: rtmp://${DISPLAY_HOST}:${PORT_RTMP}/vertical"
     echo -e "  Stats URL:       http://${DISPLAY_HOST}/stat"
-    echo -e "  Combined Chat:   http://${DISPLAY_HOST}/chat.html?twitch=USER&youtube=ID"
+    echo -e "  Combined Chat:   http://${DISPLAY_HOST}/chat.html?twitch=USER&youtube=CHANNEL"
     echo "-------------------------------------"
     echo "1) Install Docker (if not installed)"
     echo "2) Configure Stream Keys (Horizontal)"

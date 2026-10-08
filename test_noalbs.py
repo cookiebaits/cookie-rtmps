@@ -21,6 +21,45 @@ except ImportError:
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
 from noalbs.noalbs import Noalbs
+try:
+    from stream_validator import app as validator_app
+except ImportError:
+    validator_app = None
+
+class TestValidatorEndpoints(unittest.TestCase):
+    def setUp(self):
+        if validator_app:
+            self.client = validator_app.test_client()
+        else:
+            self.client = None
+
+    @patch("urllib.request.urlopen")
+    def test_yt_video_id_channel_handle_resolution(self, mock_urlopen):
+        if not self.client:
+            self.skipTest("Flask module not installed")
+        mock_response = MagicMock()
+        mock_response.read.return_value = b'{"videoId":"cdPyuLr_rI0"}'
+        mock_urlopen.return_value.__enter__.return_value = mock_response
+
+        res = self.client.get('/yt_video_id?channel=@YouTube')
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data.decode('utf-8'), 'cdPyuLr_rI0')
+
+    @patch("urllib.request.urlopen")
+    def test_yt_video_id_fallback_to_video_id(self, mock_urlopen):
+        if not self.client:
+            self.skipTest("Flask module not installed")
+        mock_urlopen.side_effect = Exception("Not found")
+
+        res = self.client.get('/yt_video_id?channel=cdPyuLr_rI0')
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data.decode('utf-8'), 'cdPyuLr_rI0')
+
+    def test_yt_video_id_missing_channel(self):
+        if not self.client:
+            self.skipTest("Flask module not installed")
+        res = self.client.get('/yt_video_id')
+        self.assertEqual(res.status_code, 400)
 
 class TestNoalbsComprehensive(unittest.TestCase):
 

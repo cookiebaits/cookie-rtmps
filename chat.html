@@ -19,6 +19,13 @@
             filter: drop-shadow(0 0 4px rgba(0,0,0,0.8));
             opacity: 0.6;
         }
+        .status-msg {
+            color: rgba(255,255,255,0.8);
+            font-size: 14px;
+            padding: 20px;
+            text-align: center;
+            margin-top: 40px;
+        }
     </style>
 </head>
 <body>
@@ -45,16 +52,59 @@
                 img.className = 'platform-icon';
                 col.appendChild(img);
 
-                const iframe = document.createElement('iframe');
-                iframe.src = p.url(channel);
-                col.appendChild(iframe);
+                if (p.id === 'youtube') {
+                    const statusDiv = document.createElement('div');
+                    statusDiv.className = 'status-msg';
+                    statusDiv.innerText = 'Detecting YouTube Live Stream...';
+                    col.appendChild(statusDiv);
+
+                    let currentIframe = null;
+
+                    async function resolveAndLoadYT() {
+                        try {
+                            const resp = await fetch(`/yt_video_id?channel=${encodeURIComponent(channel)}`);
+                            if (resp.ok) {
+                                const videoId = (await resp.text()).trim();
+                                if (videoId) {
+                                    if (!currentIframe || currentIframe.dataset.videoId !== videoId) {
+                                        if (statusDiv.parentNode) {
+                                            col.removeChild(statusDiv);
+                                        }
+                                        if (currentIframe) {
+                                            col.removeChild(currentIframe);
+                                        }
+                                        const iframe = document.createElement('iframe');
+                                        iframe.dataset.videoId = videoId;
+                                        iframe.src = p.url(videoId);
+                                        col.appendChild(iframe);
+                                        currentIframe = iframe;
+                                    }
+                                    return;
+                                }
+                            }
+                        } catch (e) {
+                            console.error('Error fetching YouTube live video ID:', e);
+                        }
+
+                        if (!currentIframe) {
+                            statusDiv.innerText = `YouTube channel (${channel}) is currently offline or video ID not found. Retrying...`;
+                        }
+                    }
+
+                    resolveAndLoadYT();
+                    setInterval(resolveAndLoadYT, 30000);
+                } else {
+                    const iframe = document.createElement('iframe');
+                    iframe.src = p.url(channel);
+                    col.appendChild(iframe);
+                }
 
                 container.appendChild(col);
             }
         });
 
         if (container.children.length === 0) {
-            container.innerHTML = '<div style="color: white; padding: 20px;">No channels specified. Add ?twitch=CHANNEL or ?youtube=VIDEO_ID to the URL.</div>';
+            container.innerHTML = '<div style="color: white; padding: 20px;">No channels specified. Add ?twitch=CHANNEL or ?youtube=CHANNEL to the URL.</div>';
         }
     </script>
 </body>
