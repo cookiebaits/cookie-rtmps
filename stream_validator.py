@@ -205,5 +205,44 @@ def publish_done():
 def health_check():
     return Response('OK', status=200)
 
+@app.route('/yt_video_id', methods=['GET'])
+def yt_video_id():
+    channel = request.args.get('channel', '').strip()
+    if not channel:
+        return Response('Missing channel', status=400)
+
+    # Prepare candidate YouTube live URLs
+    if channel.startswith('UC') and len(channel) == 24:
+        url = f"https://www.youtube.com/channel/{channel}/live"
+    elif channel.startswith('@'):
+        url = f"https://www.youtube.com/{channel}/live"
+    else:
+        url = f"https://www.youtube.com/@{channel}/live"
+
+    try:
+        import urllib.request
+        import re
+        req = urllib.request.Request(
+            url,
+            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+        )
+        with urllib.request.urlopen(req, timeout=5) as response:
+            html = response.read().decode('utf-8', errors='ignore')
+            m = re.search(r'"videoId":"([a-zA-Z0-9_-]{11})"', html)
+            if not m:
+                m = re.search(r'href="/watch\?v=([a-zA-Z0-9_-]{11})"', html)
+            if not m:
+                m = re.search(r'href="https://www\.youtube\.com/watch\?v=([a-zA-Z0-9_-]{11})"', html)
+            if m:
+                return Response(m.group(1), mimetype='text/plain')
+    except Exception as e:
+        app.logger.error(f"Error resolving YouTube live video ID for {channel}: {e}")
+
+    # Fallback if channel resolution failed but input might be a direct 11-char video ID
+    if len(channel) == 11 and not channel.startswith('@') and '/' not in channel and ' ' not in channel:
+        return Response(channel, mimetype='text/plain')
+
+    return Response('Live video not found', status=404)
+
 if __name__ == '__main__':
     app.run(host='127.0.0.1', port=8080, debug=False)
