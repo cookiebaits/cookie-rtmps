@@ -69,7 +69,7 @@ CHAT_TIKTOK=""
 
 # Host Port Settings
 PORT_RTMP="1935"
-PORT_HTTP="80"
+PORT_HTTP="81"
 PORT_STATS="8081"
 
 # NOALBS Settings
@@ -1237,7 +1237,6 @@ build_and_run() {
     if [ ! -z "$OLD_VOLUMES" ]; then
         docker volume rm -f $OLD_VOLUMES 2>/dev/null || true
     fi
-    deep_cleanup_ports_and_processes
 
     enable_bbr_and_tcp_optimizations
 
