@@ -1237,7 +1237,7 @@ build_and_run() {
     if [ ! -z "$OLD_VOLUMES" ]; then
         docker volume rm -f $OLD_VOLUMES 2>/dev/null || true
     fi
-    deep_cleanup_ports_and_processes
+    deep_cleanup_ports_and_processes quiet
 
     enable_bbr_and_tcp_optimizations
 
@@ -1499,7 +1499,9 @@ view_logs() {
 }
 
 deep_cleanup_ports_and_processes() {
-    echo -e "${YELLOW}Cleaning up host processes and unbinding all ports (1935, 80, 8080, 8081, 8443, 19350-19359)...${NC}"
+    if [ "$1" != "quiet" ]; then
+        echo -e "${YELLOW}Cleaning up host processes and unbinding all ports (1935, 80, 8080, 8081, 8443, 19350-19359)...${NC}"
+    fi
     if [ "$EUID" -ne 0 ] && command -v sudo &> /dev/null; then
         SUDO="sudo"
     else
