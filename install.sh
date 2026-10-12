@@ -93,6 +93,10 @@ if [ -f "$CONFIG_FILE" ]; then
     source "$CONFIG_FILE"
 fi
 
+if [ -z "$CHAT_HEX_KEY" ]; then
+    CHAT_HEX_KEY=$(openssl rand -hex 4 2>/dev/null || head -c 100 /dev/urandom | tr -dc 'a-f0-9' | head -c 8)
+fi
+
 save_config() {
     cat <<ENV_EOF > "$CONFIG_FILE"
 YOUTUBE_URL="$YOUTUBE_URL"
@@ -141,6 +145,7 @@ CHAT_TWITCH="$CHAT_TWITCH"
 CHAT_YOUTUBE="$CHAT_YOUTUBE"
 CHAT_KICK="$CHAT_KICK"
 CHAT_TIKTOK="$CHAT_TIKTOK"
+CHAT_HEX_KEY="$CHAT_HEX_KEY"
 SERVER_DOMAIN="$SERVER_DOMAIN"
 CHUNK_SIZE="$CHUNK_SIZE"
 STREAM_BASE_TITLE="$STREAM_BASE_TITLE"
@@ -1349,6 +1354,7 @@ build_and_run() {
     docker run -d --name cookie-rtmps \
         $PORT_MAPS \
         --restart unless-stopped \
+        -e CHAT_HEX_KEY="$CHAT_HEX_KEY" \
         -e YOUTUBE_URL="$YOUTUBE_URL" \
         -e YOUTUBE_KEY="$YOUTUBE_KEY" \
         -e FACEBOOK_URL="$FACEBOOK_URL" \
@@ -1498,19 +1504,20 @@ view_logs() {
 }
 
 deep_cleanup_ports_and_processes() {
-    echo -e "${YELLOW}Cleaning up host processes and unbinding all ports (1935, 80, 8080, 8081, 8443, 19350-19359)...${NC}"
+    echo -e "${YELLOW}Cleaning up host processes and unbinding ports (1935, 8080, 8081, 8443, 19350-19359, excluding port 80)...${NC}"
     if [ "$EUID" -ne 0 ] && command -v sudo &> /dev/null; then
         SUDO="sudo"
     else
         SUDO=""
     fi
 
-    # Stop host webservers that might hold port 80
-    $SUDO systemctl stop apache2 2>/dev/null || true
-    $SUDO systemctl stop nginx 2>/dev/null || true
-    $SUDO systemctl stop lighttpd 2>/dev/null || true
-
-    local PORTS=("$PORT_RTMP" "$PORT_HTTP" "$PORT_STATS" 80 8080 8081 1935 8443 19350 19351 19352 19353 19354 19355 19356 19357 19358 19359)
+    local RAW_PORTS=("$PORT_RTMP" "$PORT_HTTP" "$PORT_STATS" 8080 8081 1935 8443 19350 19351 19352 19353 19354 19355 19356 19357 19358 19359)
+    local PORTS=()
+    for p in "${RAW_PORTS[@]}"; do
+        if [ "$p" != "80" ]; then
+            PORTS+=("$p")
+        fi
+    done
 
     # Find and stop any docker containers publishing application ports
     if command -v docker &> /dev/null; then
@@ -1614,23 +1621,21 @@ while true; do
     echo -e "  RTMP Ingest:     rtmp://${DISPLAY_HOST}:${PORT_RTMP}/${APP_NAME}"
     echo -e "  Vertical Ingest: rtmp://${DISPLAY_HOST}:${PORT_RTMP}/vertical"
     echo -e "  Stats URL:       http://${DISPLAY_HOST}/stat"
-    echo -e "  Combined Chat:   http://${DISPLAY_HOST}/chat.html?twitch=USER&youtube=CHANNEL"
+    echo -e "  Combined Chat Config Page: http://${DISPLAY_HOST}/${CHAT_HEX_KEY}"
     echo "-------------------------------------"
     echo "1) Install Docker (if not installed)"
     echo "2) Configure Stream Keys (Horizontal)"
     echo "3) Configure Stream Keys (Vertical)"
     echo "4) Configure OBS Setup & Security Key"
     echo "5) Configure IP Whitelist (Optional)"
-    echo "6) Configure Combined Chat (Optional)"
-        echo "7) Configure Stream Titles & Twitch API (Optional)"
-        echo "8) Configure Domain / Reverse Proxy (Optional)"
-        echo "9) Configure Optimizations (Chunk Size)"
-        echo "10) Configure NOALBS Scene Switcher"
-        echo "11) Build & Start Server"
-        echo "12) Run Integration Tests"
-        echo "13) Stop Server & Uninstall"
-        echo "14) View Logs"
-        echo "15) Quit"
+    echo "6) Configure Domain / Reverse Proxy (Optional)"
+    echo "7) Configure Optimizations (Chunk Size)"
+    echo "8) Configure NOALBS Scene Switcher"
+    echo "9) Build & Start Server"
+    echo "10) Run Integration Tests"
+    echo "11) Stop Server & Uninstall"
+    echo "12) View Logs"
+    echo "13) Quit"
     echo -e "Select an option: \c"
     read -r option
 
@@ -1640,16 +1645,14 @@ while true; do
         3) configure_vertical_keys ;;
         4) configure_obs ;;
         5) configure_whitelist ;;
-        6) configure_chat ;;
-        7) configure_titles ;;
-        8) configure_domain ;;
-        9) configure_optimizations ;;
-        10) configure_noalbs ;;
-        11) build_and_run ;;
-        12) if [ -f "./integration_test.sh" ]; then chmod +x ./integration_test.sh; ./integration_test.sh; else echo -e "${RED}Test script not found.${NC}"; fi; echo -e "Press Enter to continue..."; read -r ;;
-        13) stop_and_uninstall ;;
-        14) view_logs ;;
-        15) clear; echo -e "${GREEN}Goodbye!${NC}"; break ;;
+        6) configure_domain ;;
+        7) configure_optimizations ;;
+        8) configure_noalbs ;;
+        9) build_and_run ;;
+        10) if [ -f "./integration_test.sh" ]; then chmod +x ./integration_test.sh; ./integration_test.sh; else echo -e "${RED}Test script not found.${NC}"; fi; echo -e "Press Enter to continue..."; read -r ;;
+        11) stop_and_uninstall ;;
+        12) view_logs ;;
+        13) clear; echo -e "${GREEN}Goodbye!${NC}"; break ;;
         *) echo -e "${RED}Invalid option${NC}"; sleep 1 ;;
     esac
 done

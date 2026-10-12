@@ -64,6 +64,11 @@ http {
             root /usr/local/nginx/html;
         }
 
+        location = /${CHAT_HEX_KEY} {
+            alias /usr/local/nginx/html/chat.html;
+            default_type text/html;
+        }
+
         location /yt_video_id {
             proxy_pass http://127.0.0.1:8080/yt_video_id;
             proxy_set_header Host $host;
@@ -110,6 +115,11 @@ http {
 
         location = /chat.html {
             root /usr/local/nginx/html;
+        }
+
+        location = /${CHAT_HEX_KEY} {
+            alias /usr/local/nginx/html/chat.html;
+            default_type text/html;
         }
 
         location /yt_video_id {

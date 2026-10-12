@@ -1,10 +1,56 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Combined Chat</title>
+    <title>Combined Chat Config & Display</title>
     <style>
-        body { margin: 0; padding: 0; background: transparent; overflow: hidden; display: flex; height: 100vh; font-family: sans-serif; }
-        #chat-container { display: flex; width: 100%; height: 100%; background: transparent; }
+        body { margin: 0; padding: 0; background: #121214; overflow: hidden; display: flex; flex-direction: column; height: 100vh; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+
+        #config-panel {
+            background: #1e1e24;
+            color: #ffffff;
+            padding: 12px 20px;
+            border-bottom: 1px solid #2d2d38;
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 15px;
+            z-index: 100;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+        }
+        #config-panel h3 { margin: 0; font-size: 15px; color: #a78bfa; flex-basis: 100%; text-transform: uppercase; letter-spacing: 0.5px; }
+
+        .input-group { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+        .input-group label { font-weight: 600; color: #d1d5db; width: 60px; }
+        .input-group input {
+            background: #09090b;
+            border: 1px solid #3f3f46;
+            color: #fff;
+            padding: 6px 10px;
+            border-radius: 6px;
+            font-size: 13px;
+            width: 140px;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+        .input-group input:focus { border-color: #a78bfa; }
+
+        .btn {
+            background: #7c3aed;
+            color: white;
+            border: none;
+            padding: 7px 14px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 600;
+            transition: background 0.2s;
+            margin-left: auto;
+        }
+        .btn:hover { background: #6d28d9; }
+        .btn-secondary { background: #27272a; border: 1px solid #3f3f46; color: #e4e4e7; margin-left: 0; }
+        .btn-secondary:hover { background: #3f3f46; }
+
+        #chat-container { display: flex; flex: 1; width: 100%; height: 100%; background: transparent; overflow: hidden; }
         .chat-column { flex: 1; height: 100%; position: relative; border-right: 1px solid rgba(255,255,255,0.1); }
         .chat-column:last-child { border-right: none; }
         iframe { border: none; width: 100%; height: 100%; background: transparent; }
@@ -26,13 +72,60 @@
             text-align: center;
             margin-top: 40px;
         }
+
+        /* Auto-hide config panel if loaded inside OBS browser source as chat.html directly */
+        .obs-mode #config-panel { display: none; }
+
+        #toast {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            background: #10b981;
+            color: white;
+            padding: 10px 18px;
+            border-radius: 6px;
+            font-size: 13px;
+            font-weight: 600;
+            display: none;
+            z-index: 1000;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+        }
     </style>
 </head>
 <body>
+    <div id="config-panel">
+        <h3>Combined Chat Control Panel</h3>
+        <div class="input-group">
+            <label for="input-twitch">Twitch:</label>
+            <input type="text" id="input-twitch" placeholder="channel_name" />
+        </div>
+        <div class="input-group">
+            <label for="input-youtube">YouTube:</label>
+            <input type="text" id="input-youtube" placeholder="@handle or ID" />
+        </div>
+        <div class="input-group">
+            <label for="input-kick">Kick:</label>
+            <input type="text" id="input-kick" placeholder="channel_name" />
+        </div>
+        <div class="input-group">
+            <label for="input-tiktok">TikTok:</label>
+            <input type="text" id="input-tiktok" placeholder="username" />
+        </div>
+        <button class="btn btn-secondary" onclick="copyObsUrl()">Copy OBS Browser Source URL</button>
+        <button class="btn" onclick="applySettings()">Save & Apply</button>
+    </div>
+
     <div id="chat-container"></div>
+    <div id="toast">Copied OBS Browser Source URL to Clipboard!</div>
+
     <script>
         const urlParams = new URLSearchParams(window.location.search);
         const container = document.getElementById('chat-container');
+
+        // Check if we are running in standalone OBS browser source mode (/chat.html)
+        if (window.location.pathname.endsWith('/chat.html') && window.location.search.length > 0) {
+            document.body.classList.add('obs-mode');
+        }
 
         const platforms = [
             { id: 'twitch', name: 'Twitch', icon: 'https://upload.wikimedia.org/wikipedia/commons/d/d3/Twitch_Glitch_Logo_Purple.svg', url: (c) => `https://www.twitch.tv/embed/${c}/chat?parent=${window.location.hostname || 'localhost'}&darkpopout` },
@@ -41,71 +134,123 @@
             { id: 'tiktok', name: 'TikTok', icon: 'https://upload.wikimedia.org/wikipedia/en/a/a9/TikTok_logo.svg', url: (c) => `https://www.tiktok.com/chat/?channel=${c}` }
         ];
 
+        // Load initial inputs from URL params or localStorage
         platforms.forEach(p => {
-            const channel = urlParams.get(p.id);
-            if (channel) {
-                const col = document.createElement('div');
-                col.className = 'chat-column';
-
-                const img = document.createElement('img');
-                img.src = p.icon;
-                img.className = 'platform-icon';
-                col.appendChild(img);
-
-                if (p.id === 'youtube') {
-                    const statusDiv = document.createElement('div');
-                    statusDiv.className = 'status-msg';
-                    statusDiv.innerText = 'Detecting YouTube Live Stream...';
-                    col.appendChild(statusDiv);
-
-                    let currentIframe = null;
-
-                    async function resolveAndLoadYT() {
-                        try {
-                            const resp = await fetch(`/yt_video_id?channel=${encodeURIComponent(channel)}`);
-                            if (resp.ok) {
-                                const videoId = (await resp.text()).trim();
-                                if (videoId) {
-                                    if (!currentIframe || currentIframe.dataset.videoId !== videoId) {
-                                        if (statusDiv.parentNode) {
-                                            col.removeChild(statusDiv);
-                                        }
-                                        if (currentIframe) {
-                                            col.removeChild(currentIframe);
-                                        }
-                                        const iframe = document.createElement('iframe');
-                                        iframe.dataset.videoId = videoId;
-                                        iframe.src = p.url(videoId);
-                                        col.appendChild(iframe);
-                                        currentIframe = iframe;
-                                    }
-                                    return;
-                                }
-                            }
-                        } catch (e) {
-                            console.error('Error fetching YouTube live video ID:', e);
-                        }
-
-                        if (!currentIframe) {
-                            statusDiv.innerText = `YouTube channel (${channel}) is currently offline or video ID not found. Retrying...`;
-                        }
-                    }
-
-                    resolveAndLoadYT();
-                    setInterval(resolveAndLoadYT, 30000);
-                } else {
-                    const iframe = document.createElement('iframe');
-                    iframe.src = p.url(channel);
-                    col.appendChild(iframe);
-                }
-
-                container.appendChild(col);
-            }
+            const val = urlParams.get(p.id) || localStorage.getItem(`chat_${p.id}`) || '';
+            document.getElementById(`input-${p.id}`).value = val;
         });
 
-        if (container.children.length === 0) {
-            container.innerHTML = '<div style="color: white; padding: 20px;">No channels specified. Add ?twitch=CHANNEL or ?youtube=CHANNEL to the URL.</div>';
+        function renderChats() {
+            container.innerHTML = '';
+            let activeCount = 0;
+
+            platforms.forEach(p => {
+                const channel = urlParams.get(p.id) || localStorage.getItem(`chat_${p.id}`) || '';
+                if (channel.trim()) {
+                    activeCount++;
+                    const col = document.createElement('div');
+                    col.className = 'chat-column';
+
+                    const img = document.createElement('img');
+                    img.src = p.icon;
+                    img.className = 'platform-icon';
+                    col.appendChild(img);
+
+                    if (p.id === 'youtube') {
+                        const statusDiv = document.createElement('div');
+                        statusDiv.className = 'status-msg';
+                        statusDiv.innerText = 'Detecting YouTube Live Stream...';
+                        col.appendChild(statusDiv);
+
+                        let currentIframe = null;
+
+                        async function resolveAndLoadYT() {
+                            try {
+                                const resp = await fetch(`/yt_video_id?channel=${encodeURIComponent(channel)}`);
+                                if (resp.ok) {
+                                    const videoId = (await resp.text()).trim();
+                                    if (videoId) {
+                                        if (!currentIframe || currentIframe.dataset.videoId !== videoId) {
+                                            if (statusDiv.parentNode) col.removeChild(statusDiv);
+                                            if (currentIframe) col.removeChild(currentIframe);
+                                            const iframe = document.createElement('iframe');
+                                            iframe.dataset.videoId = videoId;
+                                            iframe.src = p.url(videoId);
+                                            col.appendChild(iframe);
+                                            currentIframe = iframe;
+                                        }
+                                        return;
+                                    }
+                                }
+                            } catch (e) {
+                                console.error('Error fetching YouTube live video ID:', e);
+                            }
+
+                            if (!currentIframe) {
+                                statusDiv.innerText = `YouTube channel (${channel}) is currently offline or live video ID not found. Retrying...`;
+                            }
+                        }
+
+                        resolveAndLoadYT();
+                        setInterval(resolveAndLoadYT, 30000);
+                    } else {
+                        const iframe = document.createElement('iframe');
+                        iframe.src = p.url(channel);
+                        col.appendChild(iframe);
+                    }
+
+                    container.appendChild(col);
+                }
+            });
+
+            if (activeCount === 0) {
+                container.innerHTML = '<div style="color: #a1a1aa; padding: 40px; text-align: center; width: 100%;">No active channels configured. Enter channel names above and click "Save & Apply".</div>';
+            }
         }
+
+        function applySettings() {
+            const params = new URLSearchParams();
+            platforms.forEach(p => {
+                const val = document.getElementById(`input-${p.id}`).value.trim();
+                if (val) {
+                    localStorage.setItem(`chat_${p.id}`, val);
+                    params.set(p.id, val);
+                } else {
+                    localStorage.removeItem(`chat_${p.id}`);
+                }
+            });
+
+            const newUrl = `${window.location.pathname}?${params.toString()}`;
+            window.history.replaceState({}, '', newUrl);
+            renderChats();
+            showToast('Settings saved and applied!');
+        }
+
+        function copyObsUrl() {
+            const params = new URLSearchParams();
+            platforms.forEach(p => {
+                const val = document.getElementById(`input-${p.id}`).value.trim();
+                if (val) {
+                    params.set(p.id, val);
+                }
+            });
+
+            const obsUrl = `${window.location.protocol}//${window.location.host}/chat.html?${params.toString()}`;
+            navigator.clipboard.writeText(obsUrl).then(() => {
+                showToast('Copied OBS Browser Source URL!');
+            }).catch(err => {
+                prompt('Copy OBS Browser Source URL:', obsUrl);
+            });
+        }
+
+        function showToast(msg) {
+            const toast = document.getElementById('toast');
+            toast.innerText = msg;
+            toast.style.display = 'block';
+            setTimeout(() => { toast.style.display = 'none'; }, 3000);
+        }
+
+        renderChats();
     </script>
 </body>
 </html>
