@@ -1498,19 +1498,20 @@ view_logs() {
 }
 
 deep_cleanup_ports_and_processes() {
-    echo -e "${YELLOW}Cleaning up host processes and unbinding all ports (1935, 80, 8080, 8081, 8443, 19350-19359)...${NC}"
+    echo -e "${YELLOW}Cleaning up host processes and unbinding ports (1935, 8080, 8081, 8443, 19350-19359, excluding port 80)...${NC}"
     if [ "$EUID" -ne 0 ] && command -v sudo &> /dev/null; then
         SUDO="sudo"
     else
         SUDO=""
     fi
 
-    # Stop host webservers that might hold port 80
-    $SUDO systemctl stop apache2 2>/dev/null || true
-    $SUDO systemctl stop nginx 2>/dev/null || true
-    $SUDO systemctl stop lighttpd 2>/dev/null || true
-
-    local PORTS=("$PORT_RTMP" "$PORT_HTTP" "$PORT_STATS" 80 8080 8081 1935 8443 19350 19351 19352 19353 19354 19355 19356 19357 19358 19359)
+    local RAW_PORTS=("$PORT_RTMP" "$PORT_HTTP" "$PORT_STATS" 8080 8081 1935 8443 19350 19351 19352 19353 19354 19355 19356 19357 19358 19359)
+    local PORTS=()
+    for p in "${RAW_PORTS[@]}"; do
+        if [ "$p" != "80" ]; then
+            PORTS+=("$p")
+        fi
+    done
 
     # Find and stop any docker containers publishing application ports
     if command -v docker &> /dev/null; then
