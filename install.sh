@@ -819,48 +819,168 @@ configure_domain() {
     sleep 2
 }
 
+# Helper: Detect WireGuard and VPN subnets from local interfaces and config files
+detect_vpn_subnets() {
+    local detected=()
+
+    # 1. Detect from active network interfaces (wg*, tun*, tap*)
+    while read -r line; do
+        [ -z "$line" ] && continue
+        local cidr
+        cidr=$(echo "$line" | awk '{print $4}')
+        local iface
+        iface=$(echo "$line" | awk '{print $2}')
+        if [[ "$iface" =~ ^(wg|tun|tap) ]] && [ -n "$cidr" ]; then
+            local subnet
+            subnet=$(python3 -c "import ipaddress, sys; print(str(ipaddress.ip_network(sys.argv[1], strict=False)))" "$cidr" 2>/dev/null || echo "$cidr")
+            [ -n "$subnet" ] && detected+=("$subnet")
+        fi
+    done < <(ip -o -4 addr show 2>/dev/null || true)
+
+    # 2. Check common WireGuard config locations in /etc/wireguard
+    if [ -d "/etc/wireguard" ]; then
+        for conf in /etc/wireguard/*.conf; do
+            [ -f "$conf" ] || continue
+            while read -r addr_line; do
+                local addrs
+                addrs=$(echo "$addr_line" | sed -E 's/^[[:space:]]*Address[[:space:]]*=[[:space:]]*//I')
+                IFS=',' read -ra ADDR_ARRAY <<< "$addrs"
+                for entry in "${ADDR_ARRAY[@]}"; do
+                    entry=$(echo "$entry" | xargs)
+                    if [[ "$entry" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?$ ]]; then
+                        local subnet
+                        subnet=$(python3 -c "import ipaddress, sys; print(str(ipaddress.ip_network(sys.argv[1], strict=False)))" "$entry" 2>/dev/null || echo "$entry")
+                        [ -n "$subnet" ] && detected+=("$subnet")
+                    fi
+                done
+            done < <(grep -iE '^[[:space:]]*Address[[:space:]]*=' "$conf" 2>/dev/null || true)
+        done
+    fi
+
+    # Deduplicate detected subnets
+    if [ ${#detected[@]} -gt 0 ]; then
+        printf "%s\n" "${detected[@]}" | sort -u | tr '\n' ',' | sed 's/,$//'
+    fi
+}
+
+append_to_ip_whitelist() {
+    local new_entry="$1"
+    [ -z "$new_entry" ] && return
+    if [ -z "$ACCEPTED_IP" ]; then
+        ACCEPTED_IP="$new_entry"
+    else
+        # Avoid duplicate entries
+        IFS=',' read -ra CURRENT_IPS <<< "$ACCEPTED_IP"
+        local found=0
+        for ip_item in "${CURRENT_IPS[@]}"; do
+            if [ "$(echo "$ip_item" | xargs)" == "$new_entry" ]; then
+                found=1
+                break
+            fi
+        done
+        if [ $found -eq 0 ]; then
+            ACCEPTED_IP="${ACCEPTED_IP},${new_entry}"
+        fi
+    fi
+}
+
 configure_whitelist() {
     while true; do
         clear
         echo -e "${GREEN}=== IP Whitelist Configuration ===${NC}"
         echo -e "Current Accepted IP: ${YELLOW}${ACCEPTED_IP:-None (Allow All)}${NC}"
         echo ""
-        echo "1) Server's IP Address (For those who proxy, VPN or Wireguard Into the Server)"
-        echo "2) Manual IP Address"
-        echo "3) Clear IP Address"
-        echo "4) Back to Main Menu"
+        echo "1) Automatically Detect & Whitelist Server IP + VPN/WireGuard Subnet"
+        echo "2) Enable VPN & WireGuard Client Subnet (e.g. 10.8.0.0/24, 10.0.0.0/24)"
+        echo "3) Manual IP Address or CIDR Subnet"
+        echo "4) Clear IP Whitelist (Allow All)"
+        echo "5) Back to Main Menu"
         echo -e "Select an option: \c"
         read -r wl_opt
 
         case $wl_opt in
             1)
                 SERVER_IP_FETCH=$(curl -4 -s ifconfig.me || echo "")
-                if [ ! -z "$SERVER_IP_FETCH" ]; then
-                    ACCEPTED_IP="$SERVER_IP_FETCH"
-                    echo -e "${GREEN}IP Whitelist updated to server IP: $ACCEPTED_IP${NC}"
+                DETECTED_VPN=$(detect_vpn_subnets)
+
+                local new_whitelist=""
+                if [ -n "$SERVER_IP_FETCH" ]; then
+                    new_whitelist="$SERVER_IP_FETCH"
+                    echo -e "Detected Server Public IP: ${GREEN}$SERVER_IP_FETCH${NC}"
+                fi
+
+                if [ -n "$DETECTED_VPN" ]; then
+                    echo -e "Detected VPN/WireGuard Subnets: ${GREEN}$DETECTED_VPN${NC}"
+                    if [ -n "$new_whitelist" ]; then
+                        new_whitelist="${new_whitelist},${DETECTED_VPN}"
+                    else
+                        new_whitelist="$DETECTED_VPN"
+                    fi
                 else
-                    echo -e "${RED}Failed to fetch server IP.${NC}"
+                    echo -e "${YELLOW}No active WireGuard/VPN interface found on host.${NC}"
+                    echo -e "Common WireGuard client subnets: 10.8.0.0/24, 10.0.0.0/24, 10.13.13.0/24"
+                    echo -e "Add a VPN client subnet now? (Default: 10.8.0.0/24, Enter to add, 'n' to skip): \c"
+                    read -r vpn_choice
+                    if [[ "$vpn_choice" != "n" && "$vpn_choice" != "N" ]]; then
+                        local vpn_sub="${vpn_choice:-10.8.0.0/24}"
+                        if [ -n "$new_whitelist" ]; then
+                            new_whitelist="${new_whitelist},${vpn_sub}"
+                        else
+                            new_whitelist="$vpn_sub"
+                        fi
+                        echo -e "Included WireGuard/VPN subnet: ${GREEN}$vpn_sub${NC}"
+                    fi
+                fi
+
+                if [ -n "$new_whitelist" ]; then
+                    ACCEPTED_IP="$new_whitelist"
+                    echo -e "${GREEN}IP Whitelist updated to: $ACCEPTED_IP${NC}"
+                else
+                    echo -e "${RED}Failed to fetch server IP and no VPN subnet configured.${NC}"
                 fi
                 save_config
                 sleep 2
                 ;;
             2)
-                echo -e "Enter IP address to whitelist: \c"
-                read -r ip_input
-                if [ ! -z "$ip_input" ]; then
-                    ACCEPTED_IP="$ip_input"
-                    echo -e "${GREEN}IP Whitelist updated to: $ACCEPTED_IP${NC}"
+                DETECTED_VPN=$(detect_vpn_subnets)
+                local default_sub="10.8.0.0/24"
+                if [ -n "$DETECTED_VPN" ]; then
+                    default_sub="$DETECTED_VPN"
+                    echo -e "Detected active VPN/WireGuard interface: ${GREEN}$DETECTED_VPN${NC}"
+                fi
+                echo -e "Enter WireGuard/VPN subnet or client IP to whitelist [Default: $default_sub]: \c"
+                read -r vpn_sub_input
+                vpn_sub_input="${vpn_sub_input:-$default_sub}"
+                if [ -n "$vpn_sub_input" ]; then
+                    append_to_ip_whitelist "$vpn_sub_input"
+                    echo -e "${GREEN}VPN/WireGuard subnet added! Whitelist is now: $ACCEPTED_IP${NC}"
                     save_config
                 fi
                 sleep 2
                 ;;
             3)
+                echo -e "Enter IP address or CIDR subnet to whitelist (e.g. 192.168.1.50 or 10.8.0.0/24): \c"
+                read -r ip_input
+                if [ ! -z "$ip_input" ]; then
+                    echo -e "Append to existing whitelist or replace? (1: Append, 2: Replace) [Default: 2]: \c"
+                    read -r ar_opt
+                    if [ "$ar_opt" == "1" ]; then
+                        append_to_ip_whitelist "$ip_input"
+                    else
+                        ACCEPTED_IP="$ip_input"
+                    fi
+                    echo -e "${GREEN}IP Whitelist updated to: $ACCEPTED_IP${NC}"
+                    save_config
+                fi
+                sleep 2
+                ;;
+            4)
                 ACCEPTED_IP=""
                 echo -e "${GREEN}IP Whitelist disabled. All IPs allowed.${NC}"
                 save_config
                 sleep 2
                 ;;
-            4|"")
+            5|"")
                 break
                 ;;
             *)
