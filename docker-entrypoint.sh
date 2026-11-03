@@ -10,15 +10,8 @@ ENV_OK=0
 MAX_WAIT_VALIDATOR_SECONDS=15 # Maximum seconds to wait for validator
 VALIDATOR_CHECK_INTERVAL_SECONDS=0.2 # Check every 200ms
 
-# !!! Removed MASTER_STREAM_KEY check !!!
-# The container will now start without it, relying on destination keys for validation.
-
 echo "Starting stream key validation server..."
 # Start Gunicorn in the background to run the Flask app
-# -w 1: Use a single worker process (sufficient for this task)
-# -b 127.0.0.1:8080: Bind to the same internal host and port
-# --log-level info: Set the log level
-# stream_validator:app: Point to the 'app' object in your python file
 export PYTHONPATH=$PYTHONPATH:/app
 gunicorn \
     --workers 1 \
@@ -34,22 +27,16 @@ echo "Validator PID: $VALIDATOR_PID"
 # --- Robust Validator Check ---
 echo "Waiting for validator to be ready..."
 VALIDATOR_READY=0
-# Calculate maximum attempts based on total wait time and interval
-# Use awk for floating point division and ceiling to integer
 MAX_ATTEMPTS=$(awk -v max_wait="$MAX_WAIT_VALIDATOR_SECONDS" -v interval="$VALIDATOR_CHECK_INTERVAL_SECONDS" 'BEGIN {printf "%.0f", max_wait / interval}')
 CURRENT_ATTEMPT=0
 
 while [ $CURRENT_ATTEMPT -lt $MAX_ATTEMPTS ]; do
-    # Check if process exists AND responds to health check
-    # Added --connect-timeout and reduced --max-time for curl
     if kill -0 $VALIDATOR_PID 2>/dev/null && curl --fail --silent --connect-timeout 0.1 --max-time 0.4 http://127.0.0.1:8080/health > /dev/null; then
         echo "Validator is running and responding."
         VALIDATOR_READY=1
         break
     fi
 
-    # Log approximately every second to avoid excessive verbosity
-    # (e.g., if interval is 0.2s, log every 5 attempts)
     LOG_THROTTLE_ATTEMPTS=$(awk -v interval="$VALIDATOR_CHECK_INTERVAL_SECONDS" 'BEGIN {printf "%.0f", 1 / interval}')
     if [ $((CURRENT_ATTEMPT % LOG_THROTTLE_ATTEMPTS)) -eq 0 ] || [ $CURRENT_ATTEMPT -eq 0 ]; then
         ELAPSED_SECONDS_APPROX=$(awk -v current_attempt="$CURRENT_ATTEMPT" -v interval="$VALIDATOR_CHECK_INTERVAL_SECONDS" 'BEGIN {printf "%.1f", current_attempt * interval}')
@@ -70,7 +57,6 @@ fi
 
 
 # --- Configure Nginx based on Environment Variables ---
-# Use a temporary file for sed modifications
 TMP_TEMPLATE=$(mktemp)
 cp $NGINX_TEMPLATE $TMP_TEMPLATE
 
@@ -102,7 +88,6 @@ add_push() {
             ENV_OK=1
        fi
     else
-        # Remove the placeholder comment if key is not set
         sed -i "s|#${template_marker}| |g" $TMP_TEMPLATE
     fi
 }
@@ -144,15 +129,11 @@ add_push "V-RTMP1"      "V_RTMP1_KEY"    "V_RTMP1_URL"     "v_rtmp1"
 
 if [ $ENV_OK -eq 1 ]; then
     echo "Generating final Nginx configuration..."
-    # Use envsubst for any remaining ${VAR} placeholders (though we added most via sed now)
-    # Define the list of variables envsubst should consider
     EXPORT_VARS=$(printf '${%s} ' $(env | cut -d= -f1))
     envsubst "$EXPORT_VARS" < $TMP_TEMPLATE > $NGINX_CONF
-    rm $TMP_TEMPLATE # Clean up temp file
+    rm $TMP_TEMPLATE
 else
     echo "Warning: No destination stream keys provided. Nginx will start, but no streams will be pushed, and no incoming streams will be accepted."
-    # Still generate config from template, it will just have no push directives
-    # Define the list of variables envsubst should consider even if no ENV_OK
     EXPORT_VARS=$(printf '${%s} ' $(env | cut -d= -f1))
     envsubst "$EXPORT_VARS" < $TMP_TEMPLATE > $NGINX_CONF
     rm $TMP_TEMPLATE
@@ -166,7 +147,6 @@ if [ -n "${DEBUG}" ]; then
 fi
 
 echo "Starting Stunnel..."
-# Start stunnel in the background
 stunnel4 /etc/stunnel/stunnel.conf
 
 # --- SSL Initialization (Dummy Certificates) ---
@@ -179,7 +159,6 @@ if [ -n "$SERVER_DOMAIN" ]; then
             -keyout "${CERT_DIR}/privkey.pem" \
             -out "${CERT_DIR}/fullchain.pem" \
             -subj "/CN=${SERVER_DOMAIN}"
-        # Set permissions to prevent Nginx startup issues or security warnings
         chmod 600 "${CERT_DIR}/privkey.pem" "${CERT_DIR}/fullchain.pem"
     fi
 fi
@@ -191,9 +170,6 @@ if [ -n "$SERVER_DOMAIN" ] && [ "$SERVER_DOMAIN" != "localhost" ]; then
     (
         while true; do
             FULLCHAIN="/etc/letsencrypt/live/${SERVER_DOMAIN}/fullchain.pem"
-            # Check if it's a dummy certificate (self-signed)
-            # A real Let's Encrypt cert will have an issuer like "C = US, O = Let's Encrypt, CN = R3"
-            # Our dummy has "CN = ${SERVER_DOMAIN}"
             IS_DUMMY=0
             if [ -f "$FULLCHAIN" ]; then
                 ISSUER=$(openssl x509 -noout -issuer -in "$FULLCHAIN")
@@ -242,8 +218,8 @@ if [ "$PROTECTION_ENABLED_VAL" = "true" ]; then
     fi
 
     echo "Starting MediaMTX Disconnection Protection background process..."
-    python3 /app/noalbs/noalbs.py 2>&1 | tee -a /tmp/noalbs.log &
+    python3 /app/noalbs/noalbs.py 2>&1 | tee -a /tmp/disconnection_protection.log &
 fi
 
 echo "Starting Nginx..."
-exec "$@" # Execute the CMD from Dockerfile (nginx -g 'daemon off;')
+exec "$@"

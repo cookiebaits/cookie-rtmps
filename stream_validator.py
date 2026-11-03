@@ -54,28 +54,55 @@ else:
 if ACCEPTED_IP:
     app.logger.info(f"IP Whitelist active: {ACCEPTED_IP}")
 
+def _clean_ip_string(ip_str):
+    if not ip_str:
+        return ""
+    s = ip_str.strip()
+    # Strip enclosing square brackets (common in IPv6 representations e.g. [2a02:...]:port)
+    if s.startswith('[') and ']' in s:
+        closing_bracket = s.index(']')
+        return s[1:closing_bracket].strip()
+    # If IPv4 with port e.g. 10.18.0.1:12345
+    if ':' in s and '.' in s and '/' not in s:
+        return s.split(':', 1)[0].strip()
+    return s
+
 def is_ip_allowed(client_ip_str, accepted_ip_setting):
+    """
+    Validates client IP against an accepted IP whitelist string.
+    Supports comma-separated IPv4 and IPv6 addresses and CIDR subnets (e.g. for VPN/WireGuard).
+    Example accepted_ip_setting:
+      10.0.0.0/8,10.18.0.1,127.0.0.1,172.16.0.0/12,172.17.0.1,172.18.0.1,172.20.0.1,192.168.0.0/16,217.196.51.37,2a02:4780:10:cbe0::1
+    """
     if not accepted_ip_setting:
         return True
     try:
-        client_ip = ipaddress.ip_address(client_ip_str)
+        clean_client = _clean_ip_string(client_ip_str)
+        if not clean_client:
+            return False
+        client_ip = ipaddress.ip_address(clean_client)
 
         for item in accepted_ip_setting.split(','):
             item = item.strip()
             if not item:
                 continue
+            # Strip brackets if any item has [ipv6]
+            if item.startswith('[') and item.endswith(']'):
+                item = item[1:-1].strip()
             try:
                 if '/' in item:
+                    # CIDR network (IPv4 or IPv6)
                     net = ipaddress.ip_network(item, strict=False)
                     if client_ip in net:
                         return True
                 else:
-                    allowed_ip = ipaddress.ip_address(item)
+                    clean_item = _clean_ip_string(item)
+                    allowed_ip = ipaddress.ip_address(clean_item)
                     if client_ip == allowed_ip:
                         return True
-            except ValueError:
+            except (ValueError, TypeError):
                 continue
-    except ValueError:
+    except (ValueError, TypeError):
         pass
     return False
 
@@ -137,7 +164,7 @@ def validate():
         app.logger.info(f"ACCEPTED cloud_brb stream from {client_ip} (Key: {stream_key_attempt})")
         return Response('OK', status=200)
 
-    # IP Whitelist Check for external streams
+    # IP Whitelist Check for external streams (VPN/WireGuard/IPv4/IPv6 supported)
     if ACCEPTED_IP and not is_ip_allowed(client_ip, ACCEPTED_IP):
         app.logger.warning(f"REJECTED IP: {client_ip}")
         return Response('IP not whitelisted', status=403)

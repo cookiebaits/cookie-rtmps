@@ -17,18 +17,88 @@ except ImportError:
     mock_obsws = MagicMock()
     sys.modules["obsws_python"] = mock_obsws
 
+flask_installed = True
+try:
+    import flask
+except ImportError:
+    flask_installed = False
+    mock_flask = MagicMock()
+    sys.modules["flask"] = mock_flask
+
 # Add repo root to path
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
-from noalbs.noalbs import Noalbs, MediaMTXProtection
-try:
-    from stream_validator import app as validator_app
-except ImportError:
+from noalbs.noalbs import MediaMTXProtection, Noalbs
+from stream_validator import is_ip_allowed
+
+if flask_installed:
+    try:
+        from stream_validator import app as validator_app
+    except Exception:
+        validator_app = None
+else:
     validator_app = None
+
+class TestIPWhitelistVPNWireGuard(unittest.TestCase):
+    """
+    Tests for IP Whitelisting supporting VPN, WireGuard, IPv4/IPv6 CIDR subnets,
+    and exact addresses, including the user's reference whitelist string:
+    10.0.0.0/8,10.18.0.1,127.0.0.1,172.16.0.0/12,172.17.0.1,172.18.0.1,172.20.0.1,192.168.0.0/16,217.196.51.37,2a02:4780:10:cbe0::1
+    """
+
+    def setUp(self):
+        self.whitelist = "10.0.0.0/8,10.18.0.1,127.0.0.1,172.16.0.0/12,172.17.0.1,172.18.0.1,172.20.0.1,192.168.0.0/16,217.196.51.37,2a02:4780:10:cbe0::1"
+
+    def test_empty_whitelist_allows_all(self):
+        self.assertTrue(is_ip_allowed("8.8.8.8", ""))
+        self.assertTrue(is_ip_allowed("192.168.1.1", None))
+
+    def test_user_vpn_and_wireguard_whitelist_matches(self):
+        # 10.0.0.0/8 CIDR (VPN / WireGuard)
+        self.assertTrue(is_ip_allowed("10.5.2.1", self.whitelist))
+        self.assertTrue(is_ip_allowed("10.0.0.1", self.whitelist))
+        self.assertTrue(is_ip_allowed("10.255.255.254", self.whitelist))
+
+        # Exact IPs
+        self.assertTrue(is_ip_allowed("10.18.0.1", self.whitelist))
+        self.assertTrue(is_ip_allowed("127.0.0.1", self.whitelist))
+        self.assertTrue(is_ip_allowed("172.17.0.1", self.whitelist))
+        self.assertTrue(is_ip_allowed("172.18.0.1", self.whitelist))
+        self.assertTrue(is_ip_allowed("172.20.0.1", self.whitelist))
+        self.assertTrue(is_ip_allowed("217.196.51.37", self.whitelist))
+
+        # 172.16.0.0/12 CIDR
+        self.assertTrue(is_ip_allowed("172.16.1.5", self.whitelist))
+        self.assertTrue(is_ip_allowed("172.31.255.254", self.whitelist))
+
+        # 192.168.0.0/16 CIDR (LAN / VPN)
+        self.assertTrue(is_ip_allowed("192.168.1.50", self.whitelist))
+        self.assertTrue(is_ip_allowed("192.168.254.10", self.whitelist))
+
+        # IPv6 exact address
+        self.assertTrue(is_ip_allowed("2a02:4780:10:cbe0::1", self.whitelist))
+        self.assertTrue(is_ip_allowed("[2a02:4780:10:cbe0::1]", self.whitelist))
+
+    def test_ports_and_brackets_handling(self):
+        # Client IP with port
+        self.assertTrue(is_ip_allowed("10.18.0.1:54321", self.whitelist))
+        self.assertTrue(is_ip_allowed("[2a02:4780:10:cbe0::1]:8080", self.whitelist))
+
+    def test_unauthorized_ips_rejected(self):
+        self.assertFalse(is_ip_allowed("8.8.8.8", self.whitelist))
+        self.assertFalse(is_ip_allowed("1.1.1.1", self.whitelist))
+        self.assertFalse(is_ip_allowed("172.32.0.1", self.whitelist)) # Outside 172.16.0.0/12
+        self.assertFalse(is_ip_allowed("2a02:4780:10:cbe0::2", self.whitelist))
+
+    def test_ipv6_cidr_subnet(self):
+        v6_list = "2001:db8::/32, 10.8.0.0/24"
+        self.assertTrue(is_ip_allowed("2001:db8:1234::1", v6_list))
+        self.assertTrue(is_ip_allowed("10.8.0.5", v6_list))
+        self.assertFalse(is_ip_allowed("2001:db9::1", v6_list))
 
 class TestValidatorEndpoints(unittest.TestCase):
     def setUp(self):
-        if validator_app:
+        if validator_app and hasattr(validator_app, 'test_client'):
             self.client = validator_app.test_client()
         else:
             self.client = None
@@ -36,7 +106,7 @@ class TestValidatorEndpoints(unittest.TestCase):
     @patch("urllib.request.urlopen")
     def test_yt_video_id_channel_handle_resolution(self, mock_urlopen):
         if not self.client:
-            self.skipTest("Flask module not installed")
+            self.skipTest("Flask test client not available")
         mock_response = MagicMock()
         mock_response.read.return_value = b'{"videoId":"cdPyuLr_rI0"}'
         mock_urlopen.return_value.__enter__.return_value = mock_response
@@ -48,7 +118,7 @@ class TestValidatorEndpoints(unittest.TestCase):
     @patch("urllib.request.urlopen")
     def test_yt_video_id_fallback_to_video_id(self, mock_urlopen):
         if not self.client:
-            self.skipTest("Flask module not installed")
+            self.skipTest("Flask test client not available")
         mock_urlopen.side_effect = Exception("Not found")
 
         res = self.client.get('/yt_video_id?channel=cdPyuLr_rI0')
@@ -57,13 +127,14 @@ class TestValidatorEndpoints(unittest.TestCase):
 
     def test_yt_video_id_missing_channel(self):
         if not self.client:
-            self.skipTest("Flask module not installed")
+            self.skipTest("Flask test client not available")
         res = self.client.get('/yt_video_id')
         self.assertEqual(res.status_code, 400)
 
-class TestNoalbsComprehensive(unittest.TestCase):
+class TestMediaMTXProtectionComprehensive(unittest.TestCase):
 
     def setUp(self):
+        os.environ["MEDIAMTX_PROTECTION_ENABLED"] = "true"
         os.environ["NOALBS_ENABLED"] = "true"
         os.environ["CLOUD_BRB"] = "true"
         os.environ["FALLBACK_MODE"] = "video"
@@ -76,12 +147,12 @@ class TestNoalbsComprehensive(unittest.TestCase):
 
     def test_fallback_mode_configuration(self):
         os.environ["FALLBACK_MODE"] = "obs"
-        noalbs_obs = Noalbs()
-        self.assertEqual(noalbs_obs.fallback_mode, "obs")
+        prot_obs = MediaMTXProtection()
+        self.assertEqual(prot_obs.fallback_mode, "obs")
 
         os.environ["FALLBACK_MODE"] = "video"
-        noalbs_video = Noalbs()
-        self.assertEqual(noalbs_video.fallback_mode, "video")
+        prot_video = MediaMTXProtection()
+        self.assertEqual(prot_video.fallback_mode, "video")
 
     def make_stat_xml(self, live_bw=0, vert_bw=0, include_cloud_brb=False):
         xml = f"""<?xml version="1.0" encoding="UTF-8" ?>
@@ -132,22 +203,20 @@ class TestNoalbsComprehensive(unittest.TestCase):
 
     @patch("requests.get")
     def test_get_bitrate_calculation_and_filtering(self, mock_get):
-        noalbs = Noalbs()
+        prot = MediaMTXProtection()
 
-        # 5000 kbps live = 640000 B/s, 2000 kbps vert = 256000 B/s
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.text = self.make_stat_xml(live_bw=640000, vert_bw=256000, include_cloud_brb=True)
         mock_get.return_value = mock_resp
 
-        bitrate = noalbs.get_bitrate()
-        # Should sum live + vertical (7000 kbps) and ignore cloud_brb_loop
+        bitrate = prot.get_bitrate()
         self.assertEqual(bitrate, 7000)
 
     @patch("requests.get", side_effect=Exception("Connection refused"))
     def test_get_bitrate_handles_network_error(self, mock_get):
-        noalbs = Noalbs()
-        bitrate = noalbs.get_bitrate()
+        prot = MediaMTXProtection()
+        bitrate = prot.get_bitrate()
         self.assertEqual(bitrate, 0)
 
     @patch("noalbs.noalbs.is_valid_file", return_value=True)
@@ -155,8 +224,8 @@ class TestNoalbsComprehensive(unittest.TestCase):
     @patch("subprocess.run")
     def test_start_cloud_brb_libx264_command(self, mock_run, mock_popen, mock_is_valid):
         mock_run.return_value = MagicMock(stdout="libx264")
-        noalbs = Noalbs()
-        noalbs.start_cloud_brb()
+        prot = MediaMTXProtection()
+        prot.start_cloud_brb()
 
         mock_popen.assert_called_once()
         cmd = mock_popen.call_args[0][0]
@@ -164,7 +233,6 @@ class TestNoalbsComprehensive(unittest.TestCase):
         self.assertIn("-c:v", cmd)
         self.assertIn("libx264", cmd)
         
-        # Verify optional audio map (-map 0:a?) and port 19352 target
         self.assertIn("-map", cmd)
         self.assertIn("0:a?", cmd)
         tee_target = cmd[-1]
@@ -175,12 +243,12 @@ class TestNoalbsComprehensive(unittest.TestCase):
     @patch("subprocess.Popen")
     @patch("subprocess.run")
     def test_start_cloud_brb_restarts_crashed_process(self, mock_run, mock_popen, mock_is_valid):
-        noalbs = Noalbs()
+        prot = MediaMTXProtection()
         crashed_proc = MagicMock()
-        crashed_proc.poll.return_value = 1 # Process exited with error
-        noalbs.cloud_process = crashed_proc
+        crashed_proc.poll.return_value = 1
+        prot.cloud_process = crashed_proc
 
-        noalbs.start_cloud_brb()
+        prot.start_cloud_brb()
         mock_popen.assert_called_once()
 
     @patch("noalbs.noalbs.is_valid_file", return_value=True)
@@ -188,18 +256,18 @@ class TestNoalbsComprehensive(unittest.TestCase):
     @patch("subprocess.run")
     def test_start_cloud_brb_nvenc_command(self, mock_run, mock_popen, mock_is_valid):
         mock_run.return_value = MagicMock(stdout="h264_nvenc acceleration available")
-        noalbs = Noalbs()
-        noalbs.start_cloud_brb()
+        prot = MediaMTXProtection()
+        prot.start_cloud_brb()
 
         cmd = mock_popen.call_args[0][0]
         self.assertIn("h264_nvenc", cmd)
 
     @patch("noalbs.noalbs.is_valid_file", return_value=False)
     @patch("subprocess.Popen")
-    @patch.object(Noalbs, "ensure_brb_video_ready")
+    @patch.object(MediaMTXProtection, "ensure_brb_video_ready")
     def test_start_cloud_brb_missing_video_file(self, mock_ensure, mock_popen, mock_is_valid):
-        noalbs = Noalbs()
-        noalbs.start_cloud_brb()
+        prot = MediaMTXProtection()
+        prot.start_cloud_brb()
         mock_ensure.assert_called_once()
 
     @patch("noalbs.noalbs.urllib.request.urlopen")
@@ -208,7 +276,6 @@ class TestNoalbsComprehensive(unittest.TestCase):
     @patch("subprocess.run")
     @patch("noalbs.noalbs.is_valid_file")
     def test_ensure_brb_video_ready_downloads_default_and_transcodes(self, mock_is_valid, mock_run, mock_popen, mock_open, mock_urlopen):
-        # File missing initially (False), then present after download/transcode (True)
         mock_is_valid.side_effect = [False, True, True, True]
         mock_run.return_value = MagicMock(returncode=0, stdout="10.0")
         mock_proc = MagicMock()
@@ -220,14 +287,13 @@ class TestNoalbsComprehensive(unittest.TestCase):
         mock_response.read.return_value = b"fake video content"
         mock_urlopen.return_value.__enter__.return_value = mock_response
 
-        noalbs = Noalbs()
-        noalbs.ensure_brb_video_ready()
+        prot = MediaMTXProtection()
+        prot.ensure_brb_video_ready()
 
         mock_urlopen.assert_called_once()
         req_arg = mock_urlopen.call_args[0][0]
         self.assertEqual(req_arg.full_url, "https://filedn.com/lfh40bKbFfD5um9HDFNrJFR/brb.mp4")
 
-        # Verify FFmpeg transcode call included AAC audio and H.264
         mock_popen.assert_called_once()
         ffmpeg_cmd = mock_popen.call_args[0][0]
         self.assertEqual(ffmpeg_cmd[0], "ffmpeg")
@@ -236,27 +302,27 @@ class TestNoalbsComprehensive(unittest.TestCase):
 
     def test_cloud_brb_timeout_env_config(self):
         os.environ["CLOUD_BRB_TIMEOUT"] = "600"
-        noalbs = Noalbs()
-        self.assertEqual(noalbs.cloud_brb_timeout, 600)
+        prot = MediaMTXProtection()
+        self.assertEqual(prot.cloud_brb_timeout, 600)
 
     @patch("noalbs.noalbs.is_valid_file", return_value=True)
     @patch("subprocess.Popen")
     def test_stop_cloud_brb(self, mock_popen, mock_is_valid):
-        noalbs = Noalbs()
+        prot = MediaMTXProtection()
         mock_proc = MagicMock()
-        noalbs.cloud_process = mock_proc
-        noalbs.cloud_brb_start_time = time.time()
+        prot.cloud_process = mock_proc
+        prot.cloud_brb_start_time = time.time()
 
-        noalbs.stop_cloud_brb()
-        self.assertIsNone(noalbs.cloud_process)
-        self.assertIsNone(noalbs.cloud_brb_start_time)
+        prot.stop_cloud_brb()
+        self.assertIsNone(prot.cloud_process)
+        self.assertIsNone(prot.cloud_brb_start_time)
 
     def test_switch_scene_includes_aitum_vertical(self):
-        noalbs = Noalbs()
+        prot = MediaMTXProtection()
         mock_client = MagicMock()
-        noalbs.obs_client = mock_client
+        prot.obs_client = mock_client
 
-        noalbs.switch_scene("BRB")
+        prot.switch_scene("BRB")
         mock_client.set_current_program_scene.assert_called_with("BRB")
         mock_client.call_vendor_request.assert_called_with("aitum-vertical-canvas", "switch_scene", {"scene": "BRB"})
 
@@ -266,87 +332,79 @@ class TestNoalbsComprehensive(unittest.TestCase):
     @patch("requests.get")
     def test_disconnection_protection_simulation(self, mock_get, mock_run, mock_popen, mock_is_valid):
         mock_run.return_value = MagicMock(stdout="libx264")
-        noalbs = Noalbs()
+        prot = MediaMTXProtection()
         mock_obs = MagicMock()
 
-        # Simulate OBS returning outputActive = False when stream drops
         status_mock = MagicMock()
         status_mock.outputActive = False
         status_mock.output_active = False
         mock_obs.get_stream_status.return_value = status_mock
-        noalbs.obs_client = mock_obs
+        prot.obs_client = mock_obs
 
-        # Step 1: Active streaming
-        noalbs.is_streaming = True
+        prot.is_streaming = True
 
-        # Step 2: Ingest stream disconnects (bitrate = 0)
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.text = self.make_stat_xml(live_bw=0)
         mock_get.return_value = mock_resp
 
-        # Run logic when bitrate is 0
-        bitrate = noalbs.get_bitrate()
+        bitrate = prot.get_bitrate()
         self.assertEqual(bitrate, 0)
 
-        # Disconnection handling block simulation
-        if bitrate == 0 and noalbs.is_streaming:
-            client = noalbs.get_obs_client()
+        if bitrate == 0 and prot.is_streaming:
+            client = prot.get_obs_client()
             is_obs_streaming = True
             if client:
                 status = client.get_stream_status()
                 is_obs_streaming = getattr(status, 'output_active', getattr(status, 'outputActive', True))
 
-            if is_obs_streaming or noalbs.cloud_brb_enabled:
-                noalbs.switch_scene(noalbs.scene_brb)
-                noalbs.is_low = True
-                if noalbs.cloud_brb_enabled:
-                    noalbs.start_cloud_brb()
+            if is_obs_streaming or prot.cloud_brb_enabled:
+                prot.switch_scene(prot.scene_brb)
+                prot.is_low = True
+                if prot.cloud_brb_enabled:
+                    prot.start_cloud_brb()
             else:
-                noalbs.is_low = False
-            noalbs.is_streaming = False
+                prot.is_low = False
+            prot.is_streaming = False
 
-        # Assertions
         mock_obs.set_current_program_scene.assert_called_with("BRB")
         mock_popen.assert_called_once()
-        self.assertFalse(noalbs.is_streaming)
-        self.assertTrue(noalbs.is_low)
-        self.assertIsNotNone(noalbs.cloud_process)
+        self.assertFalse(prot.is_streaming)
+        self.assertTrue(prot.is_low)
+        self.assertIsNotNone(prot.cloud_process)
 
     @patch("noalbs.noalbs.is_valid_file", return_value=True)
     @patch("subprocess.Popen")
     @patch("subprocess.run")
     def test_timeout_300s_stops_cloud_brb(self, mock_run, mock_popen, mock_is_valid):
-        noalbs = Noalbs()
+        prot = MediaMTXProtection()
         mock_proc = MagicMock()
         mock_proc.poll = MagicMock(return_value=None)
-        noalbs.cloud_process = mock_proc
-        noalbs.cloud_brb_start_time = time.time() - 301 # Elapsed > 300s
+        prot.cloud_process = mock_proc
+        prot.cloud_brb_start_time = time.time() - 301
         
         mock_obs = MagicMock()
-        noalbs.obs_client = mock_obs
+        prot.obs_client = mock_obs
 
-        # Run timeout check
-        if noalbs.cloud_process and noalbs.cloud_brb_start_time:
-            if noalbs.cloud_process.poll() is not None:
-                noalbs.cloud_process = None
-                noalbs.start_cloud_brb()
+        if prot.cloud_process and prot.cloud_brb_start_time:
+            if prot.cloud_process.poll() is not None:
+                prot.cloud_process = None
+                prot.start_cloud_brb()
 
-            elapsed = time.time() - noalbs.cloud_brb_start_time
-            if elapsed >= noalbs.cloud_brb_timeout:
-                noalbs.stop_cloud_brb()
-                client = noalbs.get_obs_client()
+            elapsed = time.time() - prot.cloud_brb_start_time
+            if elapsed >= prot.cloud_brb_timeout:
+                prot.stop_cloud_brb()
+                client = prot.get_obs_client()
                 if client:
                     client.stop_stream()
 
-        self.assertIsNone(noalbs.cloud_process)
+        self.assertIsNone(prot.cloud_process)
         mock_obs.stop_stream.assert_called_once()
 
     @patch("requests.get")
     def test_mediamtx_source_online_check(self, mock_get):
         protection = MediaMTXProtection()
 
-        # Test when source is online
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.json.return_value = {
@@ -358,7 +416,6 @@ class TestNoalbsComprehensive(unittest.TestCase):
         mock_get.return_value = mock_resp
         self.assertTrue(protection.check_mediamtx_source_online())
 
-        # Test when all streams are offline (only offline segment running)
         mock_resp.json.return_value = {
             "items": [
                 {"name": "live", "ready": True, "online": False},
@@ -367,7 +424,6 @@ class TestNoalbsComprehensive(unittest.TestCase):
         }
         self.assertFalse(protection.check_mediamtx_source_online())
 
-        # Test API connection failure
         mock_get.side_effect = Exception("API unreachable")
         self.assertIsNone(protection.check_mediamtx_source_online())
 

@@ -20,8 +20,8 @@ You stream **one** high-quality feed to your CookieRTMPS server, and it will:
 This project includes performance tuning (optimized `chunk_size`), updated core components for better stability and security, and active maintenance.
 
 ### Key Features
-*   **Server IP Auto-Whitelisting:** Configure an IP Whitelist dynamically by auto-fetching your host IP (useful for VPN/Wireguard setups).
-*   **NOALBS Scene Switcher & Cloud BRB Integration:** Automatic bitrate monitoring to dynamically switch OBS scenes and trigger fallback `.mp4` video looping on stream disconnects—enabled by default for maximum stream stability.
+*   **Server IP & VPN/WireGuard Auto-Whitelisting:** Configure an IP Whitelist dynamically with full support for single IPv4/IPv6 addresses and CIDR subnets for WireGuard, VPNs, or proxy tunnels.
+*   **MediaMTX Disconnection Protection & Cloud BRB Integration:** Automatic bitrate monitoring to dynamically trigger fallback `.mp4` video looping and OBS scene switching on stream disconnects or low bitrate—enabled by default for maximum stream stability.
 *   **Vertical Streaming Support:** Optimized for use with the **OBS Aitum Vertical plugin**. Push a second, independent vertical feed to specialized targets (TikTok, YouTube Vertical, Twitch Vertical) alongside your horizontal stream.
 *   **Automated Stream Titles:** Automatically set and update your stream titles in the format: `Base Title / Episode # / Date`. Episode numbers are persisted and increment automatically! (Current support: Twitch API).
 *   **Aggressive Cleanup & Testing:** Built-in scripts to aggressively purge old Docker instances to avoid port conflicts and ensure smooth upgrades, backed by instant integration testing.

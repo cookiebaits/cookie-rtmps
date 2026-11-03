@@ -10,7 +10,7 @@ import threading
 import urllib.request
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger("NOALBS")
+logger = logging.getLogger("DisconnectionProtection")
 
 def is_valid_file(path):
     try:
@@ -18,7 +18,7 @@ def is_valid_file(path):
     except Exception:
         return False
 
-class Noalbs:
+class MediaMTXProtection:
     def __init__(self):
         self.enabled = os.getenv("MEDIAMTX_PROTECTION_ENABLED", os.getenv("NOALBS_ENABLED", "false")).lower() == "true"
         self.low_threshold = int(os.getenv("LOW_BITRATE", 1000))
@@ -155,7 +155,6 @@ class Noalbs:
         if self.obs_client:
             return self.obs_client
         try:
-            # Using ReqClient for scene switching
             self.obs_client = obs.ReqClient(host=self.obs_host, port=self.obs_port, password=self.obs_password, timeout=3)
             return self.obs_client
         except Exception as e:
@@ -211,7 +210,7 @@ class Noalbs:
             logger.error(f"Cloud BRB video not found at {self.brb_video_path}")
             return
 
-        logger.info("Process of noalbs taking over: Starting Cloud BRB fallback video stream...")
+        logger.info("Process of disconnection protection taking over: Starting Cloud BRB fallback video stream...")
         if not self.cloud_brb_start_time:
             self.cloud_brb_start_time = time.time()
 
@@ -268,9 +267,8 @@ class Noalbs:
             logger.info(f"Successfully switched OBS scene to: {scene}")
         except Exception as e:
             logger.error(f"OBS WebSocket Switch Error: {e}")
-            self.obs_client = None # Force reconnect next time
+            self.obs_client = None
 
-        # Attempt Aitum Vertical Canvas scene switch if plugin vendor request is supported
         try:
             if client:
                 client.call_vendor_request("aitum-vertical-canvas", "switch_scene", {"scene": scene})
@@ -280,10 +278,10 @@ class Noalbs:
 
     def run(self):
         if not self.enabled:
-            logger.info("NOALBS is disabled.")
+            logger.info("Disconnection Protection is disabled.")
             return
 
-        logger.info(f"NOALBS Started. Monitoring {self.app_name} & vertical on {self.stats_url}")
+        logger.info(f"MediaMTX Disconnection Protection Started. Monitoring {self.app_name} & vertical on {self.stats_url}")
 
         consecutive_low = 0
         while True:
@@ -320,7 +318,7 @@ class Noalbs:
                 if bitrate < self.low_threshold:
                     if not self.is_low:
                         logger.error(f"Stream disruption: Low bitrate ({bitrate}kbps < {self.low_threshold}kbps).")
-                        logger.warning(f"Process of noalbs taking over: Triggering fallback (mode: {self.fallback_mode})")
+                        logger.warning(f"Process of disconnection protection taking over: Triggering fallback (mode: {self.fallback_mode})")
                         self.is_low = True
                         if self.fallback_mode == "video" or self.cloud_brb_enabled:
                             self.start_cloud_brb()
@@ -337,10 +335,9 @@ class Noalbs:
             else:
                 consecutive_low = 0
                 if self.is_streaming:
-                    logger.error("Process of noalbs taking over: Source stream disconnected / dropped! Bitrate 0 kbps.")
+                    logger.error("Process of disconnection protection taking over: Source stream disconnected / dropped! Bitrate 0 kbps.")
                     self.is_low = True
                     if self.fallback_mode == "video" or self.cloud_brb_enabled:
-                        # Immediately start video fallback without delay on disconnect
                         self.start_cloud_brb()
                         self.switch_scene(self.scene_brb)
                     else:
@@ -349,7 +346,8 @@ class Noalbs:
 
             time.sleep(1)
 
-MediaMTXProtection = Noalbs
+# Backward compatibility alias
+Noalbs = MediaMTXProtection
 
 if __name__ == "__main__":
-    Noalbs().run()
+    MediaMTXProtection().run()

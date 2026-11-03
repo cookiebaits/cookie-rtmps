@@ -52,28 +52,28 @@ else
     echo -e "[${RED}FAILED${NC}]"
 fi
 
-# 4. Check NOALBS if enabled
-NOALBS_ENABLED=$(docker exec $CONTAINER_NAME printenv NOALBS_ENABLED 2>/dev/null || echo "false")
-if [ "$NOALBS_ENABLED" == "true" ]; then
-    echo -n "Checking NOALBS process... "
+# 4. Check Disconnection Protection if enabled
+PROTECTION_ENABLED=$(docker exec $CONTAINER_NAME printenv MEDIAMTX_PROTECTION_ENABLED 2>/dev/null || docker exec $CONTAINER_NAME printenv NOALBS_ENABLED 2>/dev/null || echo "false")
+if [ "$PROTECTION_ENABLED" == "true" ]; then
+    echo -n "Checking Disconnection Protection process... "
     if docker exec $CONTAINER_NAME pgrep -f "noalbs.py" > /dev/null; then
         echo -e "[${GREEN}PASSED${NC}]"
     else
         echo -e "[${RED}FAILED${NC}]"
     fi
 else
-    echo -e "NOALBS is ${YELLOW}DISABLED${NC}, skipping check."
+    echo -e "Disconnection Protection is ${YELLOW}DISABLED${NC}, skipping check."
 fi
 
-# 5. Run NOALBS Unit Tests
-echo -n "Running NOALBS component tests... "
-if docker exec $CONTAINER_NAME python3 /app/test_noalbs.py > /tmp/noalbs_test.log 2>&1; then
+# 5. Run Disconnection Protection Unit Tests
+echo -n "Running Disconnection Protection component tests... "
+if docker exec $CONTAINER_NAME python3 /app/test_noalbs.py > /tmp/disconnection_test.log 2>&1; then
     echo -e "[${GREEN}PASSED${NC}]"
-elif python3 test_noalbs.py > /tmp/noalbs_test.log 2>&1; then
+elif python3 test_noalbs.py > /tmp/disconnection_test.log 2>&1; then
     echo -e "[${GREEN}PASSED${NC}]"
 else
     echo -e "[${RED}FAILED${NC}]"
-    cat /tmp/noalbs_test.log 2>/dev/null || true
+    cat /tmp/disconnection_test.log 2>/dev/null || true
 fi
 
 # 6. Check Host Ports
