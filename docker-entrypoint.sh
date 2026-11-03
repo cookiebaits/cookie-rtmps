@@ -120,6 +120,17 @@ add_push "RTMP1"      "RTMP1_KEY"      "RTMP1_URL"      "rtmp1"
 add_push "RTMP2"      "RTMP2_KEY"      "RTMP2_URL"      "rtmp2"
 add_push "RTMP3"      "RTMP3_KEY"      "RTMP3_URL"      "rtmp3"
 
+# MediaMTX Disconnection Protection Relay Pushes
+if [ "$(echo "${MEDIAMTX_PROTECTION_ENABLED:-${NOALBS_ENABLED:-true}}" | tr '[:upper:]' '[:lower:]')" = "true" ]; then
+    echo "Connecting Nginx stream pipeline to MediaMTX Disconnection Protection..."
+    sed -i "s|#mediamtx|push rtmp://127.0.0.1:19360/${APP_NAME};|g" $TMP_TEMPLATE
+    sed -i "s|#v_mediamtx|push rtmp://127.0.0.1:19360/vertical;|g" $TMP_TEMPLATE
+    ENV_OK=1
+else
+    sed -i "s|#mediamtx| |g" $TMP_TEMPLATE
+    sed -i "s|#v_mediamtx| |g" $TMP_TEMPLATE
+fi
+
 # Vertical Pushes
 add_push "V-Youtube"   "V_YOUTUBE_KEY"   "V_YOUTUBE_URL"   "v_youtube"
 add_push "V-Facebook"  "V_FACEBOOK_KEY"  "V_FACEBOOK_URL"  "v_facebook"
@@ -210,9 +221,27 @@ if [ -n "$SERVER_DOMAIN" ] && [ "$SERVER_DOMAIN" != "localhost" ]; then
     ) &
 fi
 
-# --- Start NOALBS ---
-if [ "$(echo "${NOALBS_ENABLED:-true}" | tr '[:upper:]' '[:lower:]')" = "true" ]; then
-    echo "Starting NOALBS background process..."
+# --- Start MediaMTX & Disconnection Protection ---
+PROTECTION_ENABLED_VAL="$(echo "${MEDIAMTX_PROTECTION_ENABLED:-${NOALBS_ENABLED:-true}}" | tr '[:upper:]' '[:lower:]')"
+if [ "$PROTECTION_ENABLED_VAL" = "true" ]; then
+    echo "Configuring and starting MediaMTX..."
+    export BRB_VIDEO_PATH="${BRB_VIDEO_PATH:-/app/data/brb_video.mp4}"
+    if [ -f /etc/mediamtx/mediamtx.yml.template ]; then
+        envsubst '${BRB_VIDEO_PATH}' < /etc/mediamtx/mediamtx.yml.template > /etc/mediamtx/mediamtx.yml
+        MEDIAMTX_CONF="/etc/mediamtx/mediamtx.yml"
+    elif [ -f ./mediamtx/mediamtx.yml.template ]; then
+        envsubst '${BRB_VIDEO_PATH}' < ./mediamtx/mediamtx.yml.template > /tmp/mediamtx.yml
+        MEDIAMTX_CONF="/tmp/mediamtx.yml"
+    else
+        MEDIAMTX_CONF=""
+    fi
+
+    if command -v mediamtx &> /dev/null && [ -n "$MEDIAMTX_CONF" ]; then
+        echo "Starting MediaMTX binary..."
+        mediamtx "$MEDIAMTX_CONF" > /tmp/mediamtx.log 2>&1 &
+    fi
+
+    echo "Starting MediaMTX Disconnection Protection background process..."
     python3 /app/noalbs/noalbs.py 2>&1 | tee -a /tmp/noalbs.log &
 fi
 

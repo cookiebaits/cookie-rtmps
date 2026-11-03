@@ -20,7 +20,7 @@ except ImportError:
 # Add repo root to path
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
-from noalbs.noalbs import Noalbs
+from noalbs.noalbs import Noalbs, MediaMTXProtection
 try:
     from stream_validator import app as validator_app
 except ImportError:
@@ -341,6 +341,35 @@ class TestNoalbsComprehensive(unittest.TestCase):
 
         self.assertIsNone(noalbs.cloud_process)
         mock_obs.stop_stream.assert_called_once()
+
+    @patch("requests.get")
+    def test_mediamtx_source_online_check(self, mock_get):
+        protection = MediaMTXProtection()
+
+        # Test when source is online
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "items": [
+                {"name": "live", "ready": True, "online": True},
+                {"name": "vertical", "ready": True, "online": False}
+            ]
+        }
+        mock_get.return_value = mock_resp
+        self.assertTrue(protection.check_mediamtx_source_online())
+
+        # Test when all streams are offline (only offline segment running)
+        mock_resp.json.return_value = {
+            "items": [
+                {"name": "live", "ready": True, "online": False},
+                {"name": "vertical", "ready": True, "online": False}
+            ]
+        }
+        self.assertFalse(protection.check_mediamtx_source_online())
+
+        # Test API connection failure
+        mock_get.side_effect = Exception("API unreachable")
+        self.assertIsNone(protection.check_mediamtx_source_online())
 
 if __name__ == "__main__":
     unittest.main()

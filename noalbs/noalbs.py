@@ -20,7 +20,7 @@ def is_valid_file(path):
 
 class Noalbs:
     def __init__(self):
-        self.enabled = os.getenv("NOALBS_ENABLED", "false").lower() == "true"
+        self.enabled = os.getenv("MEDIAMTX_PROTECTION_ENABLED", os.getenv("NOALBS_ENABLED", "false")).lower() == "true"
         self.low_threshold = int(os.getenv("LOW_BITRATE", 1000))
         self.restore_threshold = int(os.getenv("RESTORE_BITRATE", 1500))
         self.obs_host = os.getenv("OBS_WS_HOST", "127.0.0.1")
@@ -29,8 +29,9 @@ class Noalbs:
         self.scene_main = os.getenv("OBS_SCENE_LIVE", "Main")
         self.scene_brb = os.getenv("OBS_SCENE_BRB", "BRB")
         self.app_name = os.getenv("APP_NAME", "live")
-        # NOALBS uses internal port 8081 for stats
-        self.stats_url = "http://127.0.0.1:8081/stat"
+        # Internal ports for stats & MediaMTX API
+        self.stats_url = os.getenv("STATS_URL", "http://127.0.0.1:8081/stat")
+        self.mediamtx_api_url = os.getenv("MEDIAMTX_API_URL", "http://127.0.0.1:9997/v3/paths/list")
 
         self.fallback_mode = os.getenv("FALLBACK_MODE", "video").lower()
         self.cloud_brb_enabled = os.getenv("CLOUD_BRB", "false").lower() == "true"
@@ -51,6 +52,28 @@ class Noalbs:
                 self.has_nvenc = True
         except Exception:
             self.has_nvenc = False
+
+    def check_mediamtx_source_online(self):
+        """
+        Queries MediaMTX API to check if an actual publisher is connected and online.
+        Returns: True if live source publisher is streaming, False if offline, or None if API unreachable.
+        """
+        try:
+            r = requests.get(self.mediamtx_api_url, timeout=2)
+            if r.status_code == 200:
+                data = r.json()
+                items = data.get("items", []) if isinstance(data, dict) else []
+                for item in items:
+                    name = item.get("name", "")
+                    if name in [self.app_name, "vertical", "live"]:
+                        if item.get("online", False) or item.get("source") is not None:
+                            return True
+                return False
+        except Exception as e:
+            logger.debug(f"MediaMTX API check error: {e}")
+        return None
+
+    check_mediamtx_stream_ready = check_mediamtx_source_online
 
     def ensure_brb_video_ready(self):
         default_url = "https://filedn.com/lfh40bKbFfD5um9HDFNrJFR/brb.mp4"
@@ -325,6 +348,8 @@ class Noalbs:
                     self.is_streaming = False
 
             time.sleep(1)
+
+MediaMTXProtection = Noalbs
 
 if __name__ == "__main__":
     Noalbs().run()

@@ -205,6 +205,13 @@ def publish_done():
 def health_check():
     return Response('OK', status=200)
 
+@app.route('/protection_hook', methods=['GET', 'POST'])
+def protection_hook():
+    event = request.args.get('event', '')
+    path = request.args.get('path', '')
+    app.logger.info(f"MediaMTX Protection hook received: event={event}, path={path}")
+    return Response('OK', status=200)
+
 @app.route('/yt_video_id', methods=['GET'])
 def yt_video_id():
     channel = request.args.get('channel', '').strip()
