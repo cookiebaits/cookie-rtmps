@@ -226,6 +226,14 @@ def publish_done():
         # Increment episode count when horizontal stream finishes
         increment_episode_count()
         app.logger.info("Horizontal stream finished. Episode count incremented.")
+
+    if app_name == os.getenv('APP_NAME', 'live') or app_name == 'vertical':
+        try:
+            with open("/tmp/stream_disconnected.signal", "w") as sig_f:
+                sig_f.write(str(datetime.now()))
+        except Exception:
+            pass
+
     return Response('OK', status=200)
 
 @app.route('/health', methods=['GET'])
