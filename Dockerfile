@@ -6,11 +6,20 @@ ENV NGINX_RTMP_MODULE_VERSION=cookie-nginx-rtmp
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends python3 python3-pip && \
-    pip3 install --break-system-packages flask gunicorn requests obsws-python flask-session twitchio google-api-python-client eventlet flask-socketio edge-tts && \
+    pip3 install --break-system-packages flask gunicorn requests obsws-python flask-session twitchio google-api-python-client eventlet flask-socketio edge-tts defusedxml && \
     apt-get install -y --no-install-recommends ca-certificates openssl libssl-dev stunnel4 gettext certbot ffmpeg && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* && \
     pip3 cache purge
+
+# Download and install MediaMTX (serves the looping backup video during disconnects / low bitrate)
+ENV MEDIAMTX_VERSION=v1.21.3
+RUN ARCH=$(dpkg --print-architecture) && \
+    case "$ARCH" in amd64) MTX_ARCH=amd64 ;; arm64) MTX_ARCH=arm64 ;; armhf) MTX_ARCH=armv7 ;; *) echo "Unsupported arch $ARCH"; exit 1 ;; esac && \
+    wget -qO /tmp/mediamtx.tar.gz "https://github.com/bluenviron/mediamtx/releases/download/${MEDIAMTX_VERSION}/mediamtx_${MEDIAMTX_VERSION}_linux_${MTX_ARCH}.tar.gz" && \
+    tar -xzf /tmp/mediamtx.tar.gz -C /usr/local/bin mediamtx && \
+    chmod +x /usr/local/bin/mediamtx && \
+    rm -f /tmp/mediamtx.tar.gz
 	
 # Download and decompress Nginx
 RUN mkdir -p /tmp/build/nginx && \
@@ -58,36 +67,27 @@ COPY nginx/nginx.conf.template /etc/nginx/nginx.conf.template
 
 # Copy the validation server and supporting scripts
 COPY stream_validator.py /app/stream_validator.py
+COPY stream_protection.py /app/stream_protection.py
 COPY update_titles.py /app/update_titles.py
 COPY tiktok_pusher.py /app/tiktok_pusher.py
 COPY test_noalbs.py /app/test_noalbs.py
 COPY noalbs /app/noalbs
 
 # Config Stunnel
-RUN mkdir -p  /etc/stunnel/conf.d
-# Set up config file 
+RUN mkdir -p /etc/stunnel/conf.d /var/run/stunnel4 /var/log/stunnel4
 COPY stunnel/stunnel.conf /etc/stunnel/stunnel.conf
 COPY stunnel/stunnel4 /etc/default/stunnel4
-
-#Facebook Stunnel Port 19350
-COPY stunnel/facebook.conf /etc/stunnel/conf.d/facebook.conf
-
-#Instagram Stunnel Port 19351
-COPY stunnel/instagram.conf /etc/stunnel/conf.d/instagram.conf
-
-#Tiktok Stunnel Port 19358
-COPY stunnel/tiktok.conf /etc/stunnel/conf.d/tiktok.conf
-
-#Kick Stunnel Port 19356
-COPY stunnel/kick.conf /etc/stunnel/conf.d/kick.conf
-
-#X Stunnel Port 19354
-COPY stunnel/x.conf /etc/stunnel/conf.d/x.conf
+COPY stunnel/*.conf /etc/stunnel/conf.d/
+RUN rm -f /etc/stunnel/conf.d/stunnel.conf && \
+    sed -i '/reconnect/d' /etc/stunnel/conf.d/*.conf /etc/stunnel/*.conf 2>/dev/null || true && \
+    chmod -R 755 /etc/stunnel && \
+    touch /var/log/stunnel4/stunnel.log /tmp/stunnel.log /tmp/stunnel.pid && \
+    chmod 777 /tmp/stunnel.log /tmp/stunnel.pid /var/log/stunnel4 /var/run/stunnel4
 
 RUN apt-get update && apt-get upgrade -y && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Define generic non-sensitive environment variables
-ENV YOUTUBE_URL=rtmp://x.rtmp.youtube.com/live2/
+ENV YOUTUBE_URL=rtmp://a.rtmp.youtube.com/live2/
 ENV FACEBOOK_URL=rtmp://127.0.0.1:19350/rtmp/
 ENV INSTAGRAM_URL=rtmp://127.0.0.1:19351/rtmp/
 ENV TIKTOK_URL=rtmp://127.0.0.1:19358/s_v/
