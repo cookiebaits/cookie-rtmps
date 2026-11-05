@@ -81,7 +81,18 @@ add_push() {
             sed -i "s|#${template_marker}| |g" $TMP_TEMPLATE
         else
             echo "${platform_name} activated."
-            local full_push="push ${push_url}${key_value};"
+            local clean_key="${key_value#/}"
+            local target_push=""
+            if [[ "$push_url" == *"?"* ]]; then
+                local base_url="${push_url%%\?*}"
+                local query_params="${push_url#*\?}"
+                base_url="${base_url%/}"
+                target_push="${base_url}/${clean_key}?${query_params}"
+            else
+                local base_url="${push_url%/}"
+                target_push="${base_url}/${clean_key}"
+            fi
+            local full_push="push ${target_push};"
             local escaped_push
             escaped_push=$(echo "$full_push" | sed 's/\\/\\\\/g; s/|/\\|/g; s/&/\\&/g')
             sed -i "s|#${template_marker}|${escaped_push}|g" $TMP_TEMPLATE
@@ -105,17 +116,6 @@ add_push "RTMP1"      "RTMP1_KEY"      "RTMP1_URL"      "rtmp1"
 add_push "RTMP2"      "RTMP2_KEY"      "RTMP2_URL"      "rtmp2"
 add_push "RTMP3"      "RTMP3_KEY"      "RTMP3_URL"      "rtmp3"
 
-# MediaMTX Disconnection Protection Relay Pushes
-if [ "$(echo "${MEDIAMTX_PROTECTION_ENABLED:-${NOALBS_ENABLED:-true}}" | tr '[:upper:]' '[:lower:]')" = "true" ]; then
-    echo "Connecting Nginx stream pipeline to MediaMTX Disconnection Protection..."
-    sed -i "s|#mediamtx|push rtmp://127.0.0.1:19360/${APP_NAME};|g" $TMP_TEMPLATE
-    sed -i "s|#v_mediamtx|push rtmp://127.0.0.1:19360/vertical;|g" $TMP_TEMPLATE
-    ENV_OK=1
-else
-    sed -i "s|#mediamtx| |g" $TMP_TEMPLATE
-    sed -i "s|#v_mediamtx| |g" $TMP_TEMPLATE
-fi
-
 # Vertical Pushes
 add_push "V-Youtube"   "V_YOUTUBE_KEY"   "V_YOUTUBE_URL"   "v_youtube"
 add_push "V-Facebook"  "V_FACEBOOK_KEY"  "V_FACEBOOK_URL"  "v_facebook"
@@ -124,6 +124,7 @@ add_push "V-TikTok"    "V_TIKTOK_KEY"    "V_TIKTOK_URL"    "v_tiktok"
 add_push "V-Twitch"    "V_TWITCH_KEY"    "V_TWITCH_URL"    "v_twitch"
 add_push "V-Kick"      "V_KICK_KEY"      "V_KICK_URL"      "v_kick"
 add_push "V-X (Twitter)" "V_X_KEY"        "V_X_URL"         "v_x"
+add_push "V-Trovo"      "V_TROVO_KEY"    "V_TROVO_URL"     "v_trovo"
 add_push "V-RTMP1"      "V_RTMP1_KEY"    "V_RTMP1_URL"     "v_rtmp1"
 
 
@@ -147,20 +148,47 @@ if [ -n "${DEBUG}" ]; then
 fi
 
 echo "Starting Stunnel..."
-stunnel4 /etc/stunnel/stunnel.conf
+mkdir -p /var/run/stunnel4 /var/log/stunnel4 /etc/stunnel/conf.d
+touch /var/log/stunnel4/stunnel.log /tmp/stunnel.log /tmp/stunnel.pid 2>/dev/null || true
+chmod 777 /var/run/stunnel4 /var/log/stunnel4 /tmp 2>/dev/null || true
+chmod 666 /var/log/stunnel4/stunnel.log /tmp/stunnel.log /tmp/stunnel.pid 2>/dev/null || true
+sed -i '/reconnect/d' /etc/stunnel/conf.d/*.conf /etc/stunnel/*.conf 2>/dev/null || true
+chmod -R 755 /etc/stunnel 2>/dev/null || true
+
+STUNNEL_CMD=""
+if command -v stunnel4 >/dev/null 2>&1; then
+    STUNNEL_CMD="stunnel4"
+elif command -v stunnel >/dev/null 2>&1; then
+    STUNNEL_CMD="stunnel"
+fi
+
+if [ -n "$STUNNEL_CMD" ]; then
+    echo "Starting $STUNNEL_CMD with /etc/stunnel/stunnel.conf..."
+    $STUNNEL_CMD /etc/stunnel/stunnel.conf 2>&1 || true
+    sleep 0.5
+    if ! pgrep -f stunnel >/dev/null 2>&1; then
+        echo "Stunnel warning: process not detected after launch. Checking logs:"
+        cat /tmp/stunnel.log 2>/dev/null || true
+        cat /var/log/stunnel4/stunnel.log 2>/dev/null || true
+    else
+        echo "Stunnel is running successfully."
+    fi
+else
+    echo "Warning: Stunnel binary not found in container."
+fi
 
 # --- SSL Initialization (Dummy Certificates) ---
-if [ -n "$SERVER_DOMAIN" ]; then
-    CERT_DIR="/etc/letsencrypt/live/${SERVER_DOMAIN}"
-    if [ ! -f "${CERT_DIR}/fullchain.pem" ]; then
-        echo "SSL certificate not found for ${SERVER_DOMAIN}. Generating dummy certificate..."
-        mkdir -p "${CERT_DIR}"
-        openssl req -x509 -nodes -days 1 -newkey rsa:2048 \
-            -keyout "${CERT_DIR}/privkey.pem" \
-            -out "${CERT_DIR}/fullchain.pem" \
-            -subj "/CN=${SERVER_DOMAIN}"
-        chmod 600 "${CERT_DIR}/privkey.pem" "${CERT_DIR}/fullchain.pem"
-    fi
+CERT_DOMAIN="${SERVER_DOMAIN:-localhost}"
+CERT_DIR="/etc/letsencrypt/live/${CERT_DOMAIN}"
+if [ ! -f "${CERT_DIR}/fullchain.pem" ]; then
+    echo "SSL certificate not found for ${CERT_DOMAIN}. Generating dummy certificate..."
+    mkdir -p "${CERT_DIR}"
+    openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+        -keyout "${CERT_DIR}/privkey.pem" \
+        -out "${CERT_DIR}/fullchain.pem" \
+        -subj "/CN=${CERT_DOMAIN}" 2>/dev/null || true
+    chmod 644 "${CERT_DIR}/fullchain.pem" 2>/dev/null || true
+    chmod 600 "${CERT_DIR}/privkey.pem" 2>/dev/null || true
 fi
 
 # --- Certbot Renewal Loop ---
@@ -197,29 +225,14 @@ if [ -n "$SERVER_DOMAIN" ] && [ "$SERVER_DOMAIN" != "localhost" ]; then
     ) &
 fi
 
-# --- Start MediaMTX & Disconnection Protection ---
-PROTECTION_ENABLED_VAL="$(echo "${MEDIAMTX_PROTECTION_ENABLED:-${NOALBS_ENABLED:-true}}" | tr '[:upper:]' '[:lower:]')"
-if [ "$PROTECTION_ENABLED_VAL" = "true" ]; then
-    echo "Configuring and starting MediaMTX..."
-    export BRB_VIDEO_PATH="${BRB_VIDEO_PATH:-/app/data/brb_video.mp4}"
-    if [ -f /etc/mediamtx/mediamtx.yml.template ]; then
-        envsubst '${BRB_VIDEO_PATH}' < /etc/mediamtx/mediamtx.yml.template > /etc/mediamtx/mediamtx.yml
-        MEDIAMTX_CONF="/etc/mediamtx/mediamtx.yml"
-    elif [ -f ./mediamtx/mediamtx.yml.template ]; then
-        envsubst '${BRB_VIDEO_PATH}' < ./mediamtx/mediamtx.yml.template > /tmp/mediamtx.yml
-        MEDIAMTX_CONF="/tmp/mediamtx.yml"
-    else
-        MEDIAMTX_CONF=""
-    fi
+# --- Disconnection Protection (MediaMTX backup-video failover) ---
+# Always started: it forwards the ingest stream to the platform outputs,
+# and only plays the backup video when NOALBS_ENABLED=true.
+echo "Starting Disconnection Protection..."
+python3 -u /app/stream_protection.py 2>&1 | tee -a /tmp/stream_protection.log &
 
-    if command -v mediamtx &> /dev/null && [ -n "$MEDIAMTX_CONF" ]; then
-        echo "Starting MediaMTX binary..."
-        mediamtx "$MEDIAMTX_CONF" > /tmp/mediamtx.log 2>&1 &
-    fi
-
-    echo "Starting MediaMTX Disconnection Protection background process..."
-    python3 /app/noalbs/noalbs.py 2>&1 | tee -a /tmp/disconnection_protection.log &
-fi
+echo "Verifying Nginx configuration..."
+nginx -t
 
 echo "Starting Nginx..."
 exec "$@"

@@ -1,4 +1,5 @@
 from flask import Flask, request, Response
+import json
 import os
 import logging
 from urllib.parse import parse_qs
@@ -246,6 +247,28 @@ def protection_hook():
     path = request.args.get('path', '')
     app.logger.info(f"MediaMTX Protection hook received: event={event}, path={path}")
     return Response('OK', status=200)
+
+@app.route('/api/protection', methods=['GET'])
+def api_protection_status():
+    prep = None
+    try:
+        prep_path = os.getenv('PROTECTION_PREP_STATUS_FILE', '/tmp/stream_prep_status.json')
+        if os.path.exists(prep_path):
+            with open(prep_path) as pf:
+                prep = json.load(pf)
+    except Exception:
+        pass
+
+    try:
+        status_path = os.getenv('PROTECTION_STATUS_FILE', '/tmp/stream_protection.json')
+        with open(status_path) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return Response(json.dumps({'running': False, 'prep': prep}), mimetype='application/json')
+    data['running'] = True
+    data['videoUrl'] = os.getenv('BRB_VIDEO_URL', '')
+    data['prep'] = prep
+    return Response(json.dumps(data), mimetype='application/json')
 
 @app.route('/yt_video_id', methods=['GET'])
 def yt_video_id():

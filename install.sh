@@ -1545,6 +1545,7 @@ build_and_run() {
         -e OBS_SCENE_BRB="$OBS_SCENE_BRB" \
         -e LOW_BITRATE="$LOW_BITRATE" \
         -e RESTORE_BITRATE="$RESTORE_BITRATE" \
+        -e BRB_VIDEO_URL="$BRB_VIDEO_URL" \
         -e CLOUD_BRB="$CLOUD_BRB" \
         -e CLOUD_BRB_TIMEOUT="$CLOUD_BRB_TIMEOUT" \
         -v "$(pwd)/data:/app/data" \

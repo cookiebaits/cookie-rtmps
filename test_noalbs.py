@@ -427,5 +427,70 @@ class TestMediaMTXProtectionComprehensive(unittest.TestCase):
         mock_get.side_effect = Exception("API unreachable")
         self.assertIsNone(protection.check_mediamtx_source_online())
 
+class TestStreamProtectionV2(unittest.TestCase):
+    def test_stream_protection_settings_and_channels(self):
+        import stream_protection
+        settings = stream_protection.Settings()
+        self.assertIsNotNone(settings.low_kbps)
+        self.assertIsNotNone(settings.timeout)
+
+        # Test Channel object instantiation and commands
+        ch = stream_protection.Channel("horizontal", "live", settings, protected=True)
+        ch.stream_name = "test_key"
+        feed_cmd = ch.feed_cmd()
+        relay_cmd = ch.relay_cmd()
+
+        self.assertEqual(feed_cmd[0], "ffmpeg")
+        self.assertIn("rtmp://127.0.0.1:1937/feed/horizontal", feed_cmd[-1])
+        self.assertEqual(relay_cmd[0], "ffmpeg")
+        self.assertIn("broadcast_h/horizontal", relay_cmd[-1])
+
+    def test_stream_protection_state_machine_transitions(self):
+        import stream_protection
+        from unittest.mock import MagicMock
+        settings = stream_protection.Settings()
+        settings.low_kbps = 1000
+        ch = stream_protection.Channel("horizontal", "live", settings, protected=True)
+
+        now = 1000.0
+        # Initially idle
+        self.assertEqual(ch.state, "idle")
+
+        # Stream appears
+        ch.update_bitrate(("test_key", 500000), now)
+        ch.update_bitrate(("test_key", 1000000), now + 1.0)
+        ch.start_feed = MagicMock()
+        ch.start_relay = MagicMock()
+        ch.tick(now + 1.0)
+        self.assertEqual(ch.state, "live")
+
+        # Drop publisher -> enter backup
+        ch.update_bitrate(None, now + 2.0)
+        ch.stop_feed = MagicMock()
+        ch.tick(now + 2.0)
+        self.assertEqual(ch.state, "backup")
+        self.assertIsNotNone(ch.backup_since)
+
+    def test_write_mediamtx_config(self):
+        import stream_protection
+        import tempfile
+        with tempfile.NamedTemporaryFile("w+", delete=False) as tf:
+            conf_path = tf.name
+
+        try:
+            old_conf = stream_protection.MTX_CONFIG
+            stream_protection.MTX_CONFIG = conf_path
+            videos = {"horizontal": "/app/data/brb_horizontal.mp4", "vertical": "/app/data/brb_vertical.mp4"}
+            stream_protection.write_mediamtx_config(videos)
+            with open(conf_path) as f:
+                content = f.read()
+            self.assertIn("feed/horizontal:", content)
+            self.assertIn("feed/vertical:", content)
+            self.assertIn("alwaysAvailable: true", content)
+        finally:
+            stream_protection.MTX_CONFIG = old_conf
+            if os.path.exists(conf_path):
+                os.remove(conf_path)
+
 if __name__ == "__main__":
     unittest.main()

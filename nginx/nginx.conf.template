@@ -31,6 +31,12 @@ http {
     include       mime.types;
     default_type  application/octet-stream;
 
+    # Performance & Stability Settings
+    sendfile on;
+    tcp_nopush on;
+    tcp_nodelay on;
+    keepalive_timeout 65;
+
     # Cloudflare Real IP (IPv4 only)
     set_real_ip_from 103.21.244.0/22;
     set_real_ip_from 103.22.200.0/22;
@@ -48,6 +54,8 @@ http {
     set_real_ip_from 197.234.240.0/22;
     set_real_ip_from 198.41.128.0/17;
     real_ip_header CF-Connecting-IP;
+
+    client_max_body_size 64M;
 
     # HTTP Server (Port 80)
     server {
@@ -73,6 +81,24 @@ http {
             proxy_pass http://127.0.0.1:8080/yt_video_id;
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+
+        location /api/ {
+            proxy_pass http://127.0.0.1:8080/api/;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+
+        location /health {
+            proxy_pass http://127.0.0.1:8080/health;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
         }
 
         # Redirect all other HTTP traffic to HTTPS if domain is set
@@ -126,6 +152,24 @@ http {
             proxy_pass http://127.0.0.1:8080/yt_video_id;
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+
+        location /api/ {
+            proxy_pass http://127.0.0.1:8080/api/;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+
+        location /health {
+            proxy_pass http://127.0.0.1:8080/health;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
         }
 
         location / {
@@ -134,7 +178,7 @@ http {
         }
     }
 
-    # Stats for MediaMTX Disconnection Protection (Internal Port 8081)
+    # Stats and Control for Disconnection Protection (Internal Port 8081)
     server {
         listen 8081;
         allow 127.0.0.1;
@@ -144,167 +188,66 @@ http {
             rtmp_stat all;
             rtmp_stat_stylesheet stat.xsl;
         }
+
+        location /control {
+            rtmp_control all;
+        }
     }
 }
 
 rtmp {
-    # Internal Cloud BRB / Local publishing server
     server {
+        listen 19352 proxy_protocol;
         listen 19359;
         chunk_size ${CHUNK_SIZE};
 
-        # Facebook Application
-        application facebook {
-            live on;
-            record off;
-            on_publish http://127.0.0.1:8080/validate?key=$name;
-            on_publish_done http://127.0.0.1:8080/publish_done;
-            push ${FACEBOOK_URL}${FACEBOOK_KEY};
-        }
+        # Throughput, Upload Speed Prioritization & Anti-Disconnect Buffers
+        max_message 64M;
+        out_queue 16384;
+        out_cork 32;
+        max_streams 128;
+        ack_window 10000000;
+        so_keepalive on;
 
-        # Twitch Application
-        application twitch {
-            live on;
-            record off;
-            on_publish http://127.0.0.1:8080/validate?key=$name;
-            on_publish_done http://127.0.0.1:8080/publish_done;
-            push ${TWITCH_URL}${TWITCH_KEY};
-        }
-
-        # YouTube Application
-        application youtube {
-            live on;
-            record off;
-            on_publish http://127.0.0.1:8080/validate?key=$name;
-            on_publish_done http://127.0.0.1:8080/publish_done;
-            push ${YOUTUBE_URL}${YOUTUBE_KEY};
-        }
-
-        # Kick Application
-        application kick {
-            live on;
-            record off;
-            on_publish http://127.0.0.1:8080/validate?key=$name;
-            on_publish_done http://127.0.0.1:8080/publish_done;
-            push ${KICK_URL}${KICK_KEY};
-        }
-
-        # X Application
-        application x {
-            live on;
-            record off;
-            on_publish http://127.0.0.1:8080/validate?key=$name;
-            on_publish_done http://127.0.0.1:8080/publish_done;
-            push ${X_URL}${X_KEY};
-        }
-
-        # Generic live application
-        application ${APP_NAME} {
-            live on;
-            record off;
-            on_publish http://127.0.0.1:8080/validate?key=$name;
-            on_publish_done http://127.0.0.1:8080/publish_done;
-
-            #youtube
-            #facebook
-            #instagram
-            #tiktok
-            #kick
-            #x
-            #twitch
-            #trovo
-            #rtmp1
-            #rtmp2
-            #rtmp3
-        }
-
-        # Vertical application
-        application vertical {
-            live on;
-            record off;
-            on_publish http://127.0.0.1:8080/validate?key=$name;
-            on_publish_done http://127.0.0.1:8080/publish_done;
-
-            #v_youtube
-            #v_facebook
-            #v_instagram
-            #v_tiktok
-            #v_kick
-            #v_x
-            #v_twitch
-            #v_trovo
-            #v_rtmp1
-        }
-    }
-
-    # External Stream server (receives PROXY protocol from stream block on 1935)
-    server {
-        listen 19352 proxy_protocol;
-        chunk_size ${CHUNK_SIZE};
-
-        # Throughput and Buffer Optimization for Upload Speeds
-        max_message 10M;
-        out_queue 4096;
-        out_cork 8;
-
-        # Stability and Security Enhancements
+        # Stability and Anti-Disconnect Timeout Adjustments
         ping 30s;
-        ping_timeout 10s;
-        drop_idle_publisher 10s;
+        ping_timeout 15s;
+        drop_idle_publisher 20s;
+        allow play 127.0.0.1;
         deny play all;
 
-        # Facebook Application
-        application facebook {
-            live on;
-            record off;
-            on_publish http://127.0.0.1:8080/validate?key=$name;
-            on_publish_done http://127.0.0.1:8080/publish_done;
-            push ${FACEBOOK_URL}${FACEBOOK_KEY};
-        }
-
-        # Twitch Application
-        application twitch {
-            live on;
-            record off;
-            on_publish http://127.0.0.1:8080/validate?key=$name;
-            on_publish_done http://127.0.0.1:8080/publish_done;
-            push ${TWITCH_URL}${TWITCH_KEY};
-        }
-
-        # YouTube Application
-        application youtube {
-            live on;
-            record off;
-            on_publish http://127.0.0.1:8080/validate?key=$name;
-            on_publish_done http://127.0.0.1:8080/publish_done;
-            push ${YOUTUBE_URL}${YOUTUBE_KEY};
-        }
-
-        # Kick Application
-        application kick {
-            live on;
-            record off;
-            on_publish http://127.0.0.1:8080/validate?key=$name;
-            on_publish_done http://127.0.0.1:8080/publish_done;
-            push ${KICK_URL}${KICK_KEY};
-        }
-
-        # X Application
-        application x {
-            live on;
-            record off;
-            on_publish http://127.0.0.1:8080/validate?key=$name;
-            on_publish_done http://127.0.0.1:8080/publish_done;
-            push ${X_URL}${X_KEY};
-        }
-
-        # Generic live application
+        # Horizontal ingest (OBS publishes here, validated by stream key)
         application ${APP_NAME} {
             live on;
             record off;
+            allow play 127.0.0.1;
+            allow publish all;
             on_publish http://127.0.0.1:8080/validate?key=$name;
             on_publish_done http://127.0.0.1:8080/publish_done;
-            
+
+            # Ingest only: stream_protection.py forwards to broadcast_h
+        }
+
+        # Vertical ingest
+        application vertical {
+            live on;
+            record off;
+            allow play 127.0.0.1;
+            allow publish all;
+            on_publish http://127.0.0.1:8080/validate?key=$name;
+            on_publish_done http://127.0.0.1:8080/publish_done;
+
+            # Ingest only: stream_protection.py forwards to broadcast_v
+        }
+
+        # Platform output (broadcast_h): fed only by the local protection controller
+        application broadcast_h {
+            live on;
+            record off;
+            allow publish 127.0.0.1;
+            deny publish all;
+            allow play 127.0.0.1;
+            deny play all;
             #youtube
             #facebook
             #instagram
@@ -318,13 +261,14 @@ rtmp {
             #rtmp3
         }
 
-        # Vertical application
-        application vertical {
+        # Platform output (broadcast_v): fed only by the local protection controller
+        application broadcast_v {
             live on;
             record off;
-            on_publish http://127.0.0.1:8080/validate?key=$name;
-            on_publish_done http://127.0.0.1:8080/publish_done;
-
+            allow publish 127.0.0.1;
+            deny publish all;
+            allow play 127.0.0.1;
+            deny play all;
             #v_youtube
             #v_facebook
             #v_instagram
