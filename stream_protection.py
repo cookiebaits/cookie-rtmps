@@ -119,8 +119,18 @@ class Settings:
 def probe_has_stream(path, kind):
     res = subprocess.run(
         ["ffprobe", "-v", "error", "-select_streams", kind, "-show_entries", "stream=codec_type", "-of", "csv=p=0", path],
-        capture_output=True, text=True, timeout=30)
+        capture_output=True, text=True, timeout=10)
     return res.returncode == 0 and bool(res.stdout.strip())
+
+
+def probe_codecs(path):
+    try:
+        res = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "stream=codec_name", "-of", "csv=p=0", path],
+            capture_output=True, text=True, timeout=10)
+        return [line.strip().lower() for line in res.stdout.strip().splitlines() if line.strip()]
+    except Exception:
+        return []
 
 
 def ensure_source_video(url):
@@ -166,8 +176,9 @@ def ensure_source_video(url):
 
 
 def build_output_video(source, orientation):
-    """Transcodes the backup video to a fixed broadcast format. The audio format must match
-    what the feed sends (AAC 48 kHz stereo) or MediaMTX rejects the live stream."""
+    """Ensures the backup video is usable by MediaMTX without costly transcoding delays.
+    If the source MP4 is already H.264 video with AAC audio, we directly stream-copy or link it.
+    If audio is missing, we add silent AAC audio instantly. MediaMTX natively supports H.264 + AAC MP4s."""
     w, h = OUTPUTS[orientation]["size"]
     target = os.path.join(DATA_DIR, f"brb_{orientation}.mp4" if source else f"standby_{orientation}.mp4")
     if not source and is_valid_file(target):
@@ -176,29 +187,48 @@ def build_output_video(source, orientation):
         return target
 
     tmp = target + ".tmp.mp4"
-    vf = f"scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,fps=60,format=yuv420p"
     if source:
-        inputs = ["-t", "8", "-i", source]
-        if probe_has_stream(source, "a"):
-            maps = ["-map", "0:v:0", "-map", "0:a:0?"]
+        codecs = probe_codecs(source)
+        has_h264 = "h264" in codecs
+        has_aac = "aac" in codecs
+
+        # Universal fast-path: If the MP4 is already h264 and has an audio track, copy without transcoding!
+        if has_h264 and has_aac:
+            log.info(f"Source video is already H.264/AAC. Fast-copying for {orientation}...")
+            cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                   "-i", source, "-c", "copy", "-movflags", "+faststart", tmp]
+        elif has_h264 and not has_aac:
+            # Video is h264, only synthesize silent AAC audio track instantly
+            log.info(f"Source video is H.264 without AAC audio. Adding instant AAC audio for {orientation}...")
+            cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                   "-i", source, "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
+                   "-map", "0:v:0", "-map", "1:a:0",
+                   "-c:v", "copy", "-c:a", "aac", "-ar", "48000", "-ac", "2", "-b:a", "128k",
+                   "-shortest", "-movflags", "+faststart", tmp]
         else:
-            inputs += ["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"]
-            maps = ["-map", "0:v:0", "-map", "1:a:0"]
+            # Need video transcoding: use fast 4s clip with ultrafast preset
+            vf = f"scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,fps=60,format=yuv420p"
+            inputs = ["-t", "4", "-i", source]
+            if "aac" in codecs or probe_has_stream(source, "a"):
+                maps = ["-map", "0:v:0", "-map", "0:a:0?"]
+            else:
+                inputs += ["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"]
+                maps = ["-map", "0:v:0", "-map", "1:a:0"]
+            cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", *inputs, *maps,
+                   "-t", "4", "-vf", vf, "-threads", "2", "-c:v", "libx264", "-preset", "ultrafast",
+                   "-g", "60", "-c:a", "aac", "-ar", "48000", "-ac", "2", "-b:a", "128k",
+                   "-shortest", "-movflags", "+faststart", tmp]
     else:
         log.warning(f"No backup video available, generating a plain standby screen for {orientation}.")
         inputs = ["-f", "lavfi", "-i", f"color=c=0x0f172a:s={w}x{h}:r=60:d=4",
                   "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"]
         maps = ["-map", "0:v:0", "-map", "1:a:0"]
+        cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", *inputs, *maps,
+               "-t", "4", "-threads", "2", "-c:v", "libx264", "-preset", "ultrafast",
+               "-c:a", "aac", "-ar", "48000", "-ac", "2", "-b:a", "128k",
+               "-shortest", "-movflags", "+faststart", tmp]
 
-    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", *inputs, *maps,
-           "-t", "8",
-           "-vf", vf, "-threads", "2", "-c:v", "libx264", "-preset", "ultrafast", "-profile:v", "high", "-level:v", "4.2",
-           "-g", "120", "-keyint_min", "120", "-sc_threshold", "0",
-           "-b:v", "4500k", "-maxrate", "4500k", "-bufsize", "9000k",
-           "-c:a", "aac", "-ar", "48000", "-ac", "2", "-b:a", "160k",
-           "-shortest",
-           "-movflags", "+faststart", tmp]
-    log.info(f"Preparing {orientation} backup video ({w}x{h})...")
+    log.info(f"Preparing {orientation} backup video...")
     res = subprocess.run(cmd, capture_output=True, text=True)
     if res.returncode != 0 or not is_valid_file(tmp):
         log.error(f"Backup video preparation failed for {orientation} (exit {res.returncode}): {res.stderr.strip()[-400:]}")
