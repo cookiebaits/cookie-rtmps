@@ -16,6 +16,9 @@ NC='\033[0m' # No Color
 handle_existing_instance_upgrade() {
     local HAS_OLD_CONFIG=0
 
+    # Clean up older hidden .install.sh files if present
+    rm -f .install.sh ../cookie-rtmps/.install.sh ../.install.sh 2>/dev/null || true
+
     # Check parent directory or common clone paths (../rtmp_config.env, ./rtmp_config.env, ../cookie-rtmps, ./data)
     if [ -f "rtmp_config.env" ] || [ -f "../rtmp_config.env" ] || [ -d "../cookie-rtmps/data" ] || [ -d "./data" ]; then
         HAS_OLD_CONFIG=1
