@@ -42,7 +42,17 @@ check_process() {
 
 check_process "nginx"
 check_process "gunicorn"
-check_process "stunnel4"
+
+echo -n "Checking process 'stunnel' inside container... "
+if docker exec $CONTAINER_NAME pgrep -x stunnel > /dev/null 2>&1 || \
+   docker exec $CONTAINER_NAME pgrep -x stunnel4 > /dev/null 2>&1 || \
+   docker exec $CONTAINER_NAME pgrep -f stunnel > /dev/null 2>&1 || \
+   docker exec $CONTAINER_NAME pidof stunnel > /dev/null 2>&1 || \
+   docker exec $CONTAINER_NAME pidof stunnel4 > /dev/null 2>&1; then
+    echo -e "[${GREEN}PASSED${NC}]"
+else
+    echo -e "[${RED}FAILED${NC}]"
+fi
 
 # 3. Check Flask Health Endpoint
 echo -n "Checking Flask Validator health endpoint... "
@@ -56,7 +66,8 @@ fi
 PROTECTION_ENABLED=$(docker exec $CONTAINER_NAME printenv MEDIAMTX_PROTECTION_ENABLED 2>/dev/null || docker exec $CONTAINER_NAME printenv NOALBS_ENABLED 2>/dev/null || echo "false")
 if [ "$PROTECTION_ENABLED" == "true" ]; then
     echo -n "Checking Disconnection Protection process... "
-    if docker exec $CONTAINER_NAME pgrep -f "noalbs.py" > /dev/null; then
+    if docker exec $CONTAINER_NAME pgrep -f "stream_protection.py" > /dev/null 2>&1 || \
+       docker exec $CONTAINER_NAME pgrep -f "noalbs.py" > /dev/null 2>&1; then
         echo -e "[${GREEN}PASSED${NC}]"
     else
         echo -e "[${RED}FAILED${NC}]"

@@ -2,11 +2,44 @@
 # install.sh - Menu style configuration and installation for CookieRTMPS
 # Ensure script is run with bash
 
+# Always operate from the script's directory regardless of invocation path
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
+
+# Upgrade / Overwrite Detection: Check if an existing CookieRTMPS instance or clone exists
+handle_existing_instance_upgrade() {
+    local HAS_OLD_CONFIG=0
+
+    # Check parent directory or common clone paths (../rtmp_config.env, ./rtmp_config.env, ../cookie-rtmps, ./data)
+    if [ -f "rtmp_config.env" ] || [ -f "../rtmp_config.env" ] || [ -d "../cookie-rtmps/data" ] || [ -d "./data" ]; then
+        HAS_OLD_CONFIG=1
+    fi
+
+    if [ $HAS_OLD_CONFIG -eq 1 ]; then
+        # If previous configuration file exists in an adjacent folder or backup, restore/update it
+        if [ ! -f "rtmp_config.env" ] && [ -f "../rtmp_config.env" ]; then
+            echo -e "${GREEN}Restoring configuration from previous instance (../rtmp_config.env)...${NC}"
+            cp "../rtmp_config.env" "./rtmp_config.env" 2>/dev/null || true
+        elif [ ! -f "rtmp_config.env" ] && [ -f "../cookie-rtmps/rtmp_config.env" ]; then
+            echo -e "${GREEN}Restoring configuration from ../cookie-rtmps/rtmp_config.env...${NC}"
+            cp "../cookie-rtmps/rtmp_config.env" "./rtmp_config.env" 2>/dev/null || true
+        fi
+
+        # Preserve data volume (keys, brb_video.mp4, etc.) if available in adjacent directory
+        if [ ! -d "./data" ] && [ -d "../cookie-rtmps/data" ]; then
+            mkdir -p ./data
+            cp -r ../cookie-rtmps/data/* ./data/ 2>/dev/null || true
+        fi
+    fi
+}
+
+handle_existing_instance_upgrade
 
 # Default values
 YOUTUBE_URL="rtmp://a.rtmp.youtube.com/live2/"

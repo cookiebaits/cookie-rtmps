@@ -43,8 +43,9 @@ You'd need a VPS server. Key considerations:
 
 *   2- **Clone, Set permissions, & Run the Repository:**
     ```bash
-    git clone https://github.com/cookiebaits/cookie-rtmps.git && cd cookie-rtmps && chmod +x install.sh && ./install.sh
+    git clone https://github.com/cookiebaits/cookie-rtmps.git 2>/dev/null || (cd cookie-rtmps && git pull) ; cd cookie-rtmps && chmod +x install.sh && ./install.sh
     ```
+    *   **In-Place Update Friendly:** If you run the install command again in a folder that already exists, it automatically updates existing files, preserves your stream keys (`rtmp_config.env`) and cached videos (`./data`), and launches the installer menu smoothly.
     *   Use the menu to easily install Docker (if needed).
     *   Configure your stream keys and set any desired optimizations (like NGINX `chunk_size`).
     *   Select "Build & Start Server" to launch your customized RTMP relay.
