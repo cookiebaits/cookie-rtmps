@@ -43,8 +43,9 @@ You'd need a VPS server. Key considerations:
 
 *   2- **Clone, Set permissions, & Run the Repository:**
     ```bash
-    git clone https://github.com/cookiebaits/cookie-rtmps.git && cd cookie-rtmps && chmod +x install.sh && ./install.sh
+    (if [ -d cookie-rtmps/.git ]; then (cd cookie-rtmps && git fetch origin && (git reset --hard origin/HEAD 2>/dev/null || git reset --hard origin/main 2>/dev/null || git pull)); elif [ -d cookie-rtmps ]; then (cd cookie-rtmps && git init && git remote add origin https://github.com/cookiebaits/cookie-rtmps.git 2>/dev/null || git remote set-url origin https://github.com/cookiebaits/cookie-rtmps.git; git fetch origin && (git reset --hard origin/main 2>/dev/null || git reset --hard origin/master 2>/dev/null)); else git clone https://github.com/cookiebaits/cookie-rtmps.git cookie-rtmps; fi) && cd cookie-rtmps && rm -f .install.sh && chmod +x install.sh && ./install.sh
     ```
+    *   **Seamless In-Place Overwrite & Upgrade:** Running the command when `cookie-rtmps` already exists will never fail with `destination path 'cookie-rtmps' already exists and is not an empty directory`. It cleanly overwrites and resets deployment files (including older `install.sh` and legacy `.install.sh`) while preserving your stream keys (`rtmp_config.env`) and cached videos (`./data`), launching the installer smoothly.
     *   Use the menu to easily install Docker (if needed).
     *   Configure your stream keys and set any desired optimizations (like NGINX `chunk_size`).
     *   Select "Build & Start Server" to launch your customized RTMP relay.

@@ -492,5 +492,96 @@ class TestStreamProtectionV2(unittest.TestCase):
             if os.path.exists(conf_path):
                 os.remove(conf_path)
 
+class TestInstallationAndUpgradeOverwrite(unittest.TestCase):
+    """
+    Tests ensuring the clone and installation command cleanly updates existing clones
+    and overwrites outdated install.sh and .install.sh files without throwing:
+    'fatal: destination path already exists and is not an empty directory.'
+    """
+
+    def test_existing_instance_upgrade_cleanup_dot_install_sh(self):
+        import tempfile
+        import subprocess
+
+        install_sh_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "install.sh"))
+        with open(install_sh_path, "r") as f:
+            content = f.read()
+        func_body = content.split("handle_existing_instance_upgrade() {")[1].split("\n}\n")[0]
+        func_script = f"handle_existing_instance_upgrade() {{\n{func_body}\n}}\nhandle_existing_instance_upgrade\n"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            test_dir = os.path.join(tmpdir, "cookie-rtmps")
+            os.makedirs(test_dir)
+            dot_install = os.path.join(test_dir, ".install.sh")
+            with open(dot_install, "w") as f:
+                f.write("#!/bin/bash\necho old\n")
+
+            # Execute handle_existing_instance_upgrade inside test_dir
+            res = subprocess.run(["bash", "-c", func_script], cwd=test_dir, capture_output=True, text=True)
+            self.assertEqual(res.returncode, 0)
+
+            # Assert .install.sh has been cleaned up
+            self.assertFalse(os.path.exists(dot_install))
+
+    def test_install_command_seamless_overwrite(self):
+        import tempfile
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Set up a mock remote repository
+            repo_dir = os.path.join(tmpdir, "remote_repo")
+            os.makedirs(repo_dir)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo_dir, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(["git", "config", "user.name", "Tester"], cwd=repo_dir, check=True)
+            subprocess.run(["git", "config", "user.email", "tester@example.com"], cwd=repo_dir, check=True)
+            with open(os.path.join(repo_dir, "install.sh"), "w") as f:
+                f.write("#!/bin/bash\necho v1\n")
+            subprocess.run(["git", "add", "."], cwd=repo_dir, check=True)
+            subprocess.run(["git", "commit", "-m", "v1"], cwd=repo_dir, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            # First run: fresh clone
+            cmd = (
+                f"(if [ -d cookie-rtmps/.git ]; then "
+                f"(cd cookie-rtmps && git fetch origin && (git reset --hard origin/HEAD 2>/dev/null || git reset --hard origin/main 2>/dev/null || git pull)); "
+                f"elif [ -d cookie-rtmps ]; then "
+                f"(cd cookie-rtmps && git init && git remote add origin {repo_dir} 2>/dev/null || git remote set-url origin {repo_dir}; git fetch origin && (git reset --hard origin/main 2>/dev/null || git reset --hard origin/master 2>/dev/null)); "
+                f"else git clone {repo_dir} cookie-rtmps; fi) && "
+                f"cd cookie-rtmps && rm -f .install.sh && chmod +x install.sh"
+            )
+            res1 = subprocess.run(cmd, shell=True, cwd=tmpdir, capture_output=True, text=True)
+            self.assertEqual(res1.returncode, 0)
+            self.assertNotIn("already exists and is not an empty directory", res1.stderr)
+
+            # User edits install.sh, adds a legacy .install.sh, adds config and data
+            clone_dir = os.path.join(tmpdir, "cookie-rtmps")
+            with open(os.path.join(clone_dir, "install.sh"), "w") as f:
+                f.write("#!/bin/bash\necho modified-locally\n")
+            with open(os.path.join(clone_dir, ".install.sh"), "w") as f:
+                f.write("#!/bin/bash\necho legacy-hidden\n")
+            with open(os.path.join(clone_dir, "rtmp_config.env"), "w") as f:
+                f.write("STREAM_KEY=my_secret\n")
+            os.makedirs(os.path.join(clone_dir, "data"), exist_ok=True)
+            with open(os.path.join(clone_dir, "data", "brb_video.mp4"), "w") as f:
+                f.write("mock_video_bytes")
+
+            # Remote repo publishes v2
+            with open(os.path.join(repo_dir, "install.sh"), "w") as f:
+                f.write("#!/bin/bash\necho v2-updated\n")
+            subprocess.run(["git", "commit", "-am", "v2"], cwd=repo_dir, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            # Second run: re-running install command on existing directory
+            res2 = subprocess.run(cmd, shell=True, cwd=tmpdir, capture_output=True, text=True)
+            self.assertEqual(res2.returncode, 0)
+            self.assertNotIn("already exists and is not an empty directory", res2.stderr)
+
+            # Verify that install.sh is cleanly updated to v2, .install.sh is removed, and user data/config is kept intact
+            with open(os.path.join(clone_dir, "install.sh")) as f:
+                self.assertIn("v2-updated", f.read())
+            self.assertFalse(os.path.exists(os.path.join(clone_dir, ".install.sh")))
+            with open(os.path.join(clone_dir, "rtmp_config.env")) as f:
+                self.assertEqual(f.read().strip(), "STREAM_KEY=my_secret")
+            with open(os.path.join(clone_dir, "data", "brb_video.mp4")) as f:
+                self.assertEqual(f.read(), "mock_video_bytes")
+
 if __name__ == "__main__":
     unittest.main()
