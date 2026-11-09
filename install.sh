@@ -1113,56 +1113,11 @@ ensure_brb_video_transcoded() {
         url="https://filedn.com/lfh40bKbFfD5um9HDFNrJFR/brb.mp4"
     fi
     mkdir -p ./data
-    rm -f "$target"
     echo -e "${YELLOW}Downloading BRB video from $url ...${NC}"
-    curl -L "$url" -o "${target}.tmp"
+    curl -L --fail --silent --show-error "$url" -o "${target}.tmp"
     if [ -f "${target}.tmp" ] && [ -s "${target}.tmp" ]; then
-        if command -v ffmpeg &> /dev/null; then
-            echo -e "${YELLOW}Transcoding BRB video with FFmpeg to ensure AAC audio and H.264 video compatibility...${NC}"
-
-            local duration=""
-            if command -v ffprobe &> /dev/null; then
-                duration=$(ffprobe -v error -show_entries format=duration -of default=noprintwrappers=1:nokey=1 "${target}.tmp" 2>/dev/null || true)
-            fi
-            if [ -z "$duration" ] || [ "$(awk -v d="$duration" 'BEGIN { print (d > 0) ? 1 : 0 }' 2>/dev/null)" -ne 1 ]; then
-                local dur_str
-                dur_str=$(ffmpeg -i "${target}.tmp" 2>&1 | grep "Duration" | awk '{print $2}' | tr -d ',')
-                if [ -n "$dur_str" ]; then
-                    duration=$(echo "$dur_str" | awk -F: '{ print ($1 * 3600) + ($2 * 60) + $3 }')
-                fi
-            fi
-
-            ffmpeg -y -hide_banner -loglevel warning -i "${target}.tmp" -c:v libx264 -pix_fmt yuv420p -g 60 -c:a aac -ar 48000 -ac 2 -progress pipe:1 "$target" 2>/dev/null | while read -r line; do
-                if [[ "$line" == out_time_us=* ]]; then
-                    local us="${line#*=}"
-                    if [[ "$us" =~ ^[0-9]+$ ]] && [ -n "$duration" ]; then
-                        local pct
-                        pct=$(awk -v us="$us" -v dur="$duration" 'BEGIN { if (dur>0) { p=(us/1000000/dur)*100; if (p>100) p=100; printf "%.1f", p } else { print "0.0" } }')
-                        local filled
-                        filled=$(awk -v pct="$pct" 'BEGIN { printf "%d", (pct * 30 / 100) }')
-                        local unfilled=$((30 - filled))
-                        local bar=""
-                        for ((i=0; i<filled; i++)); do bar="${bar}="; done
-                        if [ $unfilled -gt 0 ]; then
-                            bar="${bar}>"
-                            for ((i=1; i<unfilled; i++)); do bar="${bar} "; done
-                        fi
-                        printf "\rTranscoding BRB Video: [%s] %s%%" "$bar" "$pct"
-                    fi
-                fi
-            done
-            echo ""
-
-            if [ -f "$target" ] && [ -s "$target" ]; then
-                echo -e "${GREEN}BRB video successfully downloaded and transcoded.${NC}"
-                rm -f "${target}.tmp"
-            else
-                echo -e "${YELLOW}FFmpeg transcode warning. Using downloaded file directly.${NC}"
-                mv "${target}.tmp" "$target"
-            fi
-        else
-            mv "${target}.tmp" "$target"
-        fi
+        mv -f "${target}.tmp" "$target"
+        echo -e "${GREEN}BRB video successfully cached at $target.${NC}"
     else
         echo -e "${RED}Download failed.${NC}"
         rm -f "${target}.tmp"
@@ -1470,11 +1425,16 @@ build_and_run() {
     fi
 
     echo -e "${GREEN}Building Docker Image...${NC}"
-    docker build -t cookie-rtmps .
+    if ! docker build -t cookie-rtmps .; then
+        echo -e "${RED}Docker build failed. Halting startup to prevent deploying missing image.${NC}"
+        echo -e "Press Enter to return to menu..."
+        read -r
+        return
+    fi
 
     echo -e "${GREEN}Stopping any existing container...${NC}"
     docker stop cookie-rtmps 2>/dev/null || true
-    docker rm cookie-rtmps 2>/dev/null || true
+    docker rm -v -f cookie-rtmps 2>/dev/null || true
 
     echo -e "${GREEN}Starting container...${NC}"
 
@@ -1545,6 +1505,7 @@ build_and_run() {
         -e OBS_SCENE_BRB="$OBS_SCENE_BRB" \
         -e LOW_BITRATE="$LOW_BITRATE" \
         -e RESTORE_BITRATE="$RESTORE_BITRATE" \
+        -e BRB_VIDEO_URL="$BRB_VIDEO_URL" \
         -e CLOUD_BRB="$CLOUD_BRB" \
         -e CLOUD_BRB_TIMEOUT="$CLOUD_BRB_TIMEOUT" \
         -v "$(pwd)/data:/app/data" \
