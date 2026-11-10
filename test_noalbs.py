@@ -96,6 +96,22 @@ class TestIPWhitelistVPNWireGuard(unittest.TestCase):
         self.assertTrue(is_ip_allowed("10.8.0.5", v6_list))
         self.assertFalse(is_ip_allowed("2001:db9::1", v6_list))
 
+    def test_simplified_wireguard_and_server_ip_whitelist(self):
+        # Test simplified format: Server IP + WireGuard client subnet
+        server_ip = "203.0.113.195"
+        wg_subnet = "10.8.0.0/24"
+        whitelist = f"{server_ip},{wg_subnet}"
+
+        # WireGuard client IPs allowed
+        self.assertTrue(is_ip_allowed("10.8.0.1", whitelist))
+        self.assertTrue(is_ip_allowed("10.8.0.2", whitelist))
+        self.assertTrue(is_ip_allowed("10.8.0.254", whitelist))
+        # Server IP allowed
+        self.assertTrue(is_ip_allowed("203.0.113.195", whitelist))
+        # Non-whitelisted IPs blocked
+        self.assertFalse(is_ip_allowed("10.8.1.1", whitelist))
+        self.assertFalse(is_ip_allowed("198.51.100.1", whitelist))
+
 class TestValidatorEndpoints(unittest.TestCase):
     def setUp(self):
         if validator_app and hasattr(validator_app, 'test_client'):
@@ -144,6 +160,20 @@ class TestMediaMTXProtectionComprehensive(unittest.TestCase):
         os.environ["OBS_SCENE_LIVE"] = "Main"
         os.environ["OBS_SCENE_BRB"] = "BRB"
         os.environ["CLOUD_BRB_TIMEOUT"] = "300"
+
+    def test_default_protection_disabled(self):
+        # When environment variables are not set or default to false
+        orig_protection = os.environ.pop("MEDIAMTX_PROTECTION_ENABLED", None)
+        orig_noalbs = os.environ.pop("NOALBS_ENABLED", None)
+        orig_cloud_brb = os.environ.pop("CLOUD_BRB", None)
+        try:
+            prot_default = MediaMTXProtection()
+            self.assertFalse(prot_default.enabled)
+            self.assertFalse(prot_default.cloud_brb_enabled)
+        finally:
+            if orig_protection is not None: os.environ["MEDIAMTX_PROTECTION_ENABLED"] = orig_protection
+            if orig_noalbs is not None: os.environ["NOALBS_ENABLED"] = orig_noalbs
+            if orig_cloud_brb is not None: os.environ["CLOUD_BRB"] = orig_cloud_brb
 
     def test_fallback_mode_configuration(self):
         os.environ["FALLBACK_MODE"] = "obs"

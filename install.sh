@@ -73,8 +73,8 @@ PORT_HTTP="81"
 PORT_STATS="8081"
 
 # Disconnection Protection Settings (MediaMTX)
-MEDIAMTX_PROTECTION_ENABLED="true"
-NOALBS_ENABLED="true" # Retained for environment backward compatibility
+MEDIAMTX_PROTECTION_ENABLED="false"
+NOALBS_ENABLED="false" # Retained for environment backward compatibility
 FALLBACK_MODE="video"
 OBS_WS_HOST="127.0.0.1"
 OBS_WS_PORT="4455"
@@ -83,7 +83,7 @@ OBS_SCENE_LIVE="Main"
 OBS_SCENE_BRB="BRB"
 LOW_BITRATE="1000"
 RESTORE_BITRATE="1500"
-CLOUD_BRB="true"
+CLOUD_BRB="false"
 BRB_VIDEO_URL=""
 CLOUD_BRB_TIMEOUT="300"
 
@@ -857,19 +857,18 @@ configure_whitelist() {
             echo -e "  ${YELLOW}${ACCEPTED_IP}${NC}"
         fi
         echo ""
-        echo "1) Server IP & Auto-detect VPN/WireGuard Subnets"
-        echo "2) Add / Configure VPN & WireGuard Subnets (e.g. 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, WireGuard)"
-        echo "3) Manual IP Address or CIDR Subnet (Append or Replace)"
-        echo "4) Clear IP Whitelist (Allow All)"
-        echo "5) Back to Main Menu"
+        echo "1) Whitelist Server IP + WireGuard Subnet"
+        echo "2) Custom IP Address or CIDR Subnet (Add/Update)"
+        echo "3) Clear IP Whitelist (Allow All)"
+        echo "4) Back to Main Menu"
         echo -e "Select an option: \c"
         read -r wl_opt
 
         case $wl_opt in
             1)
-                SERVER_IP_FETCH=$(curl -4 -s ifconfig.me || echo "")
+                SERVER_IP_FETCH=$(curl -4 -s ifconfig.me 2>/dev/null || echo "")
                 DETECTED_NETWORKS=""
-                # Check for active wireguard / vpn interfaces (wg*, tun*, tap*)
+                # Auto-detect active wireguard / vpn interfaces (wg*, tun*, tap*)
                 if command -v ip &> /dev/null; then
                     DETECTED_NETWORKS=$(ip -o -4 addr show 2>/dev/null | awk '$2 ~ /^(wg|tun|tap)/ {print $4}' | paste -sd, -)
                 fi
@@ -877,116 +876,47 @@ configure_whitelist() {
                     DETECTED_NETWORKS=$(grep -h -oP '(?<=Address\s*=\s*)[0-9a-fA-F:./]+' /etc/wireguard/*.conf 2>/dev/null | paste -sd, - || true)
                 fi
 
+                # Default WireGuard subnet if none detected
+                if [ -z "$DETECTED_NETWORKS" ]; then
+                    DETECTED_NETWORKS="10.8.0.0/24"
+                fi
+
                 NEW_LIST=""
                 if [ -n "$SERVER_IP_FETCH" ]; then
                     NEW_LIST="$SERVER_IP_FETCH"
                 fi
                 if [ -n "$DETECTED_NETWORKS" ]; then
-                    echo -e "${GREEN}Detected active VPN/WireGuard interface subnet(s): $DETECTED_NETWORKS${NC}"
                     if [ -n "$NEW_LIST" ]; then
                         NEW_LIST="${NEW_LIST},${DETECTED_NETWORKS}"
                     else
                         NEW_LIST="$DETECTED_NETWORKS"
                     fi
-                else
-                    echo -e "${YELLOW}No active WireGuard/VPN interface auto-detected.${NC}"
-                    echo -e "Would you like to include default WireGuard client subnet (10.8.0.0/24)? [y/N]: \c"
-                    read -r wg_yn
-                    if [[ "$wg_yn" =~ ^[Yy]$ ]]; then
-                        if [ -n "$NEW_LIST" ]; then
-                            NEW_LIST="${NEW_LIST},10.8.0.0/24"
-                        else
-                            NEW_LIST="10.8.0.0/24"
-                        fi
-                    fi
                 fi
 
-                echo ""
-                echo "1) Replace existing whitelist with: $NEW_LIST"
-                echo "2) Append to existing whitelist"
-                echo -e "Choice [1]: \c"
-                read -r app_choice
-                if [ "$app_choice" == "2" ]; then
-                    append_to_ip_whitelist "$NEW_LIST"
-                else
-                    ACCEPTED_IP="$NEW_LIST"
-                fi
+                append_to_ip_whitelist "$NEW_LIST"
                 save_config
-                echo -e "${GREEN}IP Whitelist updated to: $ACCEPTED_IP${NC}"
+                echo -e "${GREEN}Whitelisted Server IP and WireGuard: $ACCEPTED_IP${NC}"
                 sleep 2
                 ;;
             2)
-                echo -e "\n${YELLOW}=== VPN & WireGuard Subnet Presets ===${NC}"
-                echo "1) Standard WireGuard Subnet (10.8.0.0/24)"
-                echo "2) Entire 10.0.0.0/8 Network (VPN/Internal)"
-                echo "3) Entire 172.16.0.0/12 Network (Docker/VPN)"
-                echo "4) Entire 192.168.0.0/16 Network (LAN/VPN)"
-                echo "5) All Private Networks + WireGuard (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16)"
-                echo "6) Custom Subnet CIDR (e.g. 10.18.0.0/24 or IPv6 prefix)"
-                echo -e "Select preset: \c"
-                read -r vpn_opt
-
-                TARGET_SUBNET=""
-                case $vpn_opt in
-                    1) TARGET_SUBNET="10.8.0.0/24" ;;
-                    2) TARGET_SUBNET="10.0.0.0/8" ;;
-                    3) TARGET_SUBNET="172.16.0.0/12" ;;
-                    4) TARGET_SUBNET="192.168.0.0/16" ;;
-                    5) TARGET_SUBNET="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16" ;;
-                    6)
-                        echo -e "Enter custom subnet CIDR: \c"
-                        read -r TARGET_SUBNET
-                        ;;
-                    *)
-                        echo -e "${RED}Invalid selection.${NC}"
-                        sleep 1
-                        continue
-                        ;;
-                esac
-
-                if [ -n "$TARGET_SUBNET" ]; then
-                    echo ""
-                    echo "1) Append to existing whitelist"
-                    echo "2) Replace entire whitelist"
-                    echo -e "Choice [1]: \c"
-                    read -r mode_opt
-                    if [ "$mode_opt" == "2" ]; then
-                        ACCEPTED_IP="$TARGET_SUBNET"
-                    else
-                        append_to_ip_whitelist "$TARGET_SUBNET"
-                    fi
-                    save_config
-                    echo -e "${GREEN}IP Whitelist updated to: $ACCEPTED_IP${NC}"
-                    sleep 2
-                fi
-                ;;
-            3)
                 echo -e "Enter IP address(es) or CIDR subnet(s) to whitelist (comma-separated, IPv4 & IPv6 supported):"
-                echo -e "${YELLOW}Example: 10.0.0.0/8,10.18.0.1,127.0.0.1,172.16.0.0/12,172.17.0.1,192.168.0.0/16,217.196.51.37,2a02:4780:10:cbe0::1${NC}"
+                echo -e "${YELLOW}Example: 10.8.0.0/24,217.196.51.37,2a02:4780:10:cbe0::1${NC}"
                 echo -e "Input: \c"
                 read -r ip_input
                 if [ ! -z "$ip_input" ]; then
-                    echo "1) Append to current list"
-                    echo "2) Replace current list"
-                    echo -e "Choice [1]: \c"
-                    read -r add_choice
-                    if [ "$add_choice" == "2" ]; then
-                        ACCEPTED_IP="$ip_input"
-                    else
-                        append_to_ip_whitelist "$ip_input"
-                    fi
-                    echo -e "${GREEN}IP Whitelist updated to: $ACCEPTED_IP${NC}"
+                    append_to_ip_whitelist "$ip_input"
                     save_config
+                    echo -e "${GREEN}IP Whitelist updated to: $ACCEPTED_IP${NC}"
                 fi
                 sleep 2
                 ;;
-            4)
+            3)
                 ACCEPTED_IP=""
                 echo -e "${GREEN}IP Whitelist cleared. All incoming client IPs allowed.${NC}"
                 save_config
                 sleep 2
                 ;;
-            5|"")
+            4|"")
                 break
                 ;;
             *)
@@ -1458,15 +1388,19 @@ build_and_run() {
     fi
 
     mkdir -p ./data
-    if [ -f "./data/brb_video.mp4" ] && [ -s "./data/brb_video.mp4" ]; then
-        echo -e "${GREEN}Existing BRB video found at ./data/brb_video.mp4. Preserving video source.${NC}"
-    else
-        if [ -z "$BRB_VIDEO_URL" ]; then
-            echo -e "${YELLOW}BRB Video URL is empty and no cached video exists. Setting to default...${NC}"
-            BRB_VIDEO_URL="https://filedn.com/lfh40bKbFfD5um9HDFNrJFR/brb.mp4"
-            save_config
+    if [ "$MEDIAMTX_PROTECTION_ENABLED" == "true" ] && [ "$CLOUD_BRB" == "true" ]; then
+        if [ -f "./data/brb_video.mp4" ] && [ -s "./data/brb_video.mp4" ]; then
+            echo -e "${GREEN}Existing BRB video found at ./data/brb_video.mp4. Preserving video source.${NC}"
+        else
+            if [ -z "$BRB_VIDEO_URL" ]; then
+                echo -e "${YELLOW}BRB Video URL is empty and no cached video exists. Setting to default...${NC}"
+                BRB_VIDEO_URL="https://filedn.com/lfh40bKbFfD5um9HDFNrJFR/brb.mp4"
+                save_config
+            fi
+            ensure_brb_video_transcoded "$BRB_VIDEO_URL"
         fi
-        ensure_brb_video_transcoded "$BRB_VIDEO_URL"
+    else
+        echo -e "${YELLOW}Disconnection protection / Cloud BRB is disabled. Skipping BRB video download and transcode.${NC}"
     fi
 
     echo -e "${GREEN}Building Docker Image...${NC}"

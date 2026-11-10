@@ -106,7 +106,7 @@ add_push "RTMP2"      "RTMP2_KEY"      "RTMP2_URL"      "rtmp2"
 add_push "RTMP3"      "RTMP3_KEY"      "RTMP3_URL"      "rtmp3"
 
 # MediaMTX Disconnection Protection Relay Pushes
-if [ "$(echo "${MEDIAMTX_PROTECTION_ENABLED:-${NOALBS_ENABLED:-true}}" | tr '[:upper:]' '[:lower:]')" = "true" ]; then
+if [ "$(echo "${MEDIAMTX_PROTECTION_ENABLED:-${NOALBS_ENABLED:-false}}" | tr '[:upper:]' '[:lower:]')" = "true" ]; then
     echo "Connecting Nginx stream pipeline to MediaMTX Disconnection Protection..."
     sed -i "s|#mediamtx|push rtmp://127.0.0.1:19360/${APP_NAME};|g" $TMP_TEMPLATE
     sed -i "s|#v_mediamtx|push rtmp://127.0.0.1:19360/vertical;|g" $TMP_TEMPLATE
@@ -198,7 +198,7 @@ if [ -n "$SERVER_DOMAIN" ] && [ "$SERVER_DOMAIN" != "localhost" ]; then
 fi
 
 # --- Start MediaMTX & Disconnection Protection ---
-PROTECTION_ENABLED_VAL="$(echo "${MEDIAMTX_PROTECTION_ENABLED:-${NOALBS_ENABLED:-true}}" | tr '[:upper:]' '[:lower:]')"
+PROTECTION_ENABLED_VAL="$(echo "${MEDIAMTX_PROTECTION_ENABLED:-${NOALBS_ENABLED:-false}}" | tr '[:upper:]' '[:lower:]')"
 if [ "$PROTECTION_ENABLED_VAL" = "true" ]; then
     echo "Configuring and starting MediaMTX..."
     export BRB_VIDEO_PATH="${BRB_VIDEO_PATH:-/app/data/brb_video.mp4}"
