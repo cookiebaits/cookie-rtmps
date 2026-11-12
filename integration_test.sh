@@ -52,24 +52,22 @@ else
     echo -e "[${RED}FAILED${NC}]"
 fi
 
-# 4. Check Disconnection Protection if enabled
-PROTECTION_ENABLED=$(docker exec $CONTAINER_NAME printenv MEDIAMTX_PROTECTION_ENABLED 2>/dev/null || docker exec $CONTAINER_NAME printenv NOALBS_ENABLED 2>/dev/null || echo "false")
+# 4. Check Stream Protection supervisor if enabled
+PROTECTION_ENABLED=$(docker exec $CONTAINER_NAME printenv PROTECTION_ENABLED 2>/dev/null || echo "false")
 if [ "$PROTECTION_ENABLED" == "true" ]; then
-    echo -n "Checking Disconnection Protection process... "
-    if docker exec $CONTAINER_NAME pgrep -f "noalbs.py" > /dev/null; then
+    echo -n "Checking Stream Protection process... "
+    if docker exec $CONTAINER_NAME pgrep -f "stream_protection.py" > /dev/null; then
         echo -e "[${GREEN}PASSED${NC}]"
     else
         echo -e "[${RED}FAILED${NC}]"
     fi
 else
-    echo -e "Disconnection Protection is ${YELLOW}DISABLED${NC}, skipping check."
+    echo -e "Stream Protection is ${YELLOW}DISABLED${NC}, skipping check."
 fi
 
-# 5. Run Disconnection Protection Unit Tests
-echo -n "Running Disconnection Protection component tests... "
-if docker exec $CONTAINER_NAME python3 /app/test_noalbs.py > /tmp/disconnection_test.log 2>&1; then
-    echo -e "[${GREEN}PASSED${NC}]"
-elif python3 test_noalbs.py > /tmp/disconnection_test.log 2>&1; then
+# 5. Run Stream Protection Unit Tests
+echo -n "Running Stream Protection component tests... "
+if docker exec $CONTAINER_NAME python3 -m py_compile /app/protection/stream_protection.py > /tmp/disconnection_test.log 2>&1; then
     echo -e "[${GREEN}PASSED${NC}]"
 else
     echo -e "[${RED}FAILED${NC}]"

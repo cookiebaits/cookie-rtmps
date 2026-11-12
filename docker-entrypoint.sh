@@ -6,12 +6,10 @@ export SERVER_DOMAIN="${SERVER_DOMAIN:-localhost}"
 NGINX_TEMPLATE=/etc/nginx/nginx.conf.template
 NGINX_CONF=/etc/nginx/nginx.conf
 VALIDATOR_LOG=/tmp/validator.log
-ENV_OK=0
-MAX_WAIT_VALIDATOR_SECONDS=15 # Maximum seconds to wait for validator
-VALIDATOR_CHECK_INTERVAL_SECONDS=0.2 # Check every 200ms
+MAX_WAIT_VALIDATOR_SECONDS=15
+VALIDATOR_CHECK_INTERVAL_SECONDS=0.2
 
 echo "Starting stream key validation server..."
-# Start Gunicorn in the background to run the Flask app
 export PYTHONPATH=$PYTHONPATH:/app
 gunicorn \
     --workers 1 \
@@ -24,7 +22,6 @@ gunicorn \
 VALIDATOR_PID=$!
 echo "Validator PID: $VALIDATOR_PID"
 
-# --- Robust Validator Check ---
 echo "Waiting for validator to be ready..."
 VALIDATOR_READY=0
 MAX_ATTEMPTS=$(awk -v max_wait="$MAX_WAIT_VALIDATOR_SECONDS" -v interval="$VALIDATOR_CHECK_INTERVAL_SECONDS" 'BEGIN {printf "%.0f", max_wait / interval}')
@@ -36,110 +33,21 @@ while [ $CURRENT_ATTEMPT -lt $MAX_ATTEMPTS ]; do
         VALIDATOR_READY=1
         break
     fi
-
-    LOG_THROTTLE_ATTEMPTS=$(awk -v interval="$VALIDATOR_CHECK_INTERVAL_SECONDS" 'BEGIN {printf "%.0f", 1 / interval}')
-    if [ $((CURRENT_ATTEMPT % LOG_THROTTLE_ATTEMPTS)) -eq 0 ] || [ $CURRENT_ATTEMPT -eq 0 ]; then
-        ELAPSED_SECONDS_APPROX=$(awk -v current_attempt="$CURRENT_ATTEMPT" -v interval="$VALIDATOR_CHECK_INTERVAL_SECONDS" 'BEGIN {printf "%.1f", current_attempt * interval}')
-        echo "Validator not ready yet, waiting... (${ELAPSED_SECONDS_APPROX}s / ${MAX_WAIT_VALIDATOR_SECONDS}s)"
-    fi
     sleep $VALIDATOR_CHECK_INTERVAL_SECONDS
     CURRENT_ATTEMPT=$((CURRENT_ATTEMPT + 1))
 done
 
 if [ $VALIDATOR_READY -eq 0 ]; then
-    ELAPSED_SECONDS_FINAL=$(awk -v current_attempt="$CURRENT_ATTEMPT" -v interval="$VALIDATOR_CHECK_INTERVAL_SECONDS" 'BEGIN {printf "%.1f", current_attempt * interval}')
-    echo "ERROR: Stream key validator failed to start or respond within ${ELAPSED_SECONDS_FINAL}s (max ${MAX_WAIT_VALIDATOR_SECONDS}s)."
+    echo "ERROR: Stream key validator failed to start within ${MAX_WAIT_VALIDATOR_SECONDS}s."
     echo "Check validator logs:"
     cat "$VALIDATOR_LOG"
     exit 1
 fi
-# --- End Validator Check ---
 
+echo "Generating Nginx configuration..."
+EXPORT_VARS=$(printf '${%s} ' $(env | cut -d= -f1))
+envsubst "$EXPORT_VARS" < $NGINX_TEMPLATE > $NGINX_CONF
 
-# --- Configure Nginx based on Environment Variables ---
-TMP_TEMPLATE=$(mktemp)
-cp $NGINX_TEMPLATE $TMP_TEMPLATE
-
-echo "Configuring Nginx push destinations..."
-
-# Function to add push directive if key is present
-add_push() {
-    local platform_name="$1"
-    local env_key_var="$2"
-    local env_url_var="$3"
-    local template_marker="$4"
-    local push_url="${!env_url_var}" # Indirect variable expansion
-    local key_value="${!env_key_var}" # Indirect variable expansion
-
-    if [ -n "$key_value" ]; then
-        if [ -z "$push_url" ]; then
-             echo "Warning: ${platform_name} key (${env_key_var}) is set, but URL (${env_url_var}) is empty. Skipping push."
-             sed -i "s|#${template_marker}| |g" $TMP_TEMPLATE
-        elif [ "$push_url" = "auto" ]; then
-            echo "${platform_name} Auto-Pusher activated."
-            ENV_OK=1
-            sed -i "s|#${template_marker}| |g" $TMP_TEMPLATE
-        else
-            echo "${platform_name} activated."
-            local full_push="push ${push_url}${key_value};"
-            local escaped_push
-            escaped_push=$(echo "$full_push" | sed 's/\\/\\\\/g; s/|/\\|/g; s/&/\\&/g')
-            sed -i "s|#${template_marker}|${escaped_push}|g" $TMP_TEMPLATE
-            ENV_OK=1
-       fi
-    else
-        sed -i "s|#${template_marker}| |g" $TMP_TEMPLATE
-    fi
-}
-
-# Add pushes for each platform using the function
-add_push "Youtube"    "YOUTUBE_KEY"    "YOUTUBE_URL"    "youtube"
-add_push "Facebook"   "FACEBOOK_KEY"   "FACEBOOK_URL"   "facebook"
-add_push "Instagram"  "INSTAGRAM_KEY"  "INSTAGRAM_URL"  "instagram"
-add_push "TikTok"     "TIKTOK_KEY"     "TIKTOK_URL"     "tiktok"
-add_push "Twitch"     "TWITCH_KEY"     "TWITCH_URL"     "twitch"
-add_push "Kick"       "KICK_KEY"       "KICK_URL"       "kick"
-add_push "X (Twitter)" "X_KEY"          "X_URL"          "x"
-add_push "Trovo"      "TROVO_KEY"      "TROVO_URL"      "trovo"
-add_push "RTMP1"      "RTMP1_KEY"      "RTMP1_URL"      "rtmp1"
-add_push "RTMP2"      "RTMP2_KEY"      "RTMP2_URL"      "rtmp2"
-add_push "RTMP3"      "RTMP3_KEY"      "RTMP3_URL"      "rtmp3"
-
-# MediaMTX Disconnection Protection Relay Pushes
-if [ "$(echo "${MEDIAMTX_PROTECTION_ENABLED:-${NOALBS_ENABLED:-true}}" | tr '[:upper:]' '[:lower:]')" = "true" ]; then
-    echo "Connecting Nginx stream pipeline to MediaMTX Disconnection Protection..."
-    sed -i "s|#mediamtx|push rtmp://127.0.0.1:19360/${APP_NAME};|g" $TMP_TEMPLATE
-    sed -i "s|#v_mediamtx|push rtmp://127.0.0.1:19360/vertical;|g" $TMP_TEMPLATE
-    ENV_OK=1
-else
-    sed -i "s|#mediamtx| |g" $TMP_TEMPLATE
-    sed -i "s|#v_mediamtx| |g" $TMP_TEMPLATE
-fi
-
-# Vertical Pushes
-add_push "V-Youtube"   "V_YOUTUBE_KEY"   "V_YOUTUBE_URL"   "v_youtube"
-add_push "V-Facebook"  "V_FACEBOOK_KEY"  "V_FACEBOOK_URL"  "v_facebook"
-add_push "V-Instagram" "V_INSTAGRAM_KEY" "V_INSTAGRAM_URL" "v_instagram"
-add_push "V-TikTok"    "V_TIKTOK_KEY"    "V_TIKTOK_URL"    "v_tiktok"
-add_push "V-Twitch"    "V_TWITCH_KEY"    "V_TWITCH_URL"    "v_twitch"
-add_push "V-Kick"      "V_KICK_KEY"      "V_KICK_URL"      "v_kick"
-add_push "V-X (Twitter)" "V_X_KEY"        "V_X_URL"         "v_x"
-add_push "V-RTMP1"      "V_RTMP1_KEY"    "V_RTMP1_URL"     "v_rtmp1"
-
-
-if [ $ENV_OK -eq 1 ]; then
-    echo "Generating final Nginx configuration..."
-    EXPORT_VARS=$(printf '${%s} ' $(env | cut -d= -f1))
-    envsubst "$EXPORT_VARS" < $TMP_TEMPLATE > $NGINX_CONF
-    rm $TMP_TEMPLATE
-else
-    echo "Warning: No destination stream keys provided. Nginx will start, but no streams will be pushed, and no incoming streams will be accepted."
-    EXPORT_VARS=$(printf '${%s} ' $(env | cut -d= -f1))
-    envsubst "$EXPORT_VARS" < $TMP_TEMPLATE > $NGINX_CONF
-    rm $TMP_TEMPLATE
-fi
-
-# Debug output if requested
 if [ -n "${DEBUG}" ]; then
     echo "--- Final Nginx Configuration (${NGINX_CONF}) ---"
     cat $NGINX_CONF
@@ -149,7 +57,6 @@ fi
 echo "Starting Stunnel..."
 stunnel4 /etc/stunnel/stunnel.conf
 
-# --- SSL Initialization (Dummy Certificates) ---
 if [ -n "$SERVER_DOMAIN" ]; then
     CERT_DIR="/etc/letsencrypt/live/${SERVER_DOMAIN}"
     if [ ! -f "${CERT_DIR}/fullchain.pem" ]; then
@@ -163,7 +70,6 @@ if [ -n "$SERVER_DOMAIN" ]; then
     fi
 fi
 
-# --- Certbot Renewal Loop ---
 if [ -n "$SERVER_DOMAIN" ] && [ "$SERVER_DOMAIN" != "localhost" ]; then
     mkdir -p /var/www/certbot
     echo "Starting Certbot renewal background loop..."
@@ -197,29 +103,14 @@ if [ -n "$SERVER_DOMAIN" ] && [ "$SERVER_DOMAIN" != "localhost" ]; then
     ) &
 fi
 
-# --- Start MediaMTX & Disconnection Protection ---
-PROTECTION_ENABLED_VAL="$(echo "${MEDIAMTX_PROTECTION_ENABLED:-${NOALBS_ENABLED:-true}}" | tr '[:upper:]' '[:lower:]')"
-if [ "$PROTECTION_ENABLED_VAL" = "true" ]; then
-    echo "Configuring and starting MediaMTX..."
-    export BRB_VIDEO_PATH="${BRB_VIDEO_PATH:-/app/data/brb_video.mp4}"
-    if [ -f /etc/mediamtx/mediamtx.yml.template ]; then
-        envsubst '${BRB_VIDEO_PATH}' < /etc/mediamtx/mediamtx.yml.template > /etc/mediamtx/mediamtx.yml
-        MEDIAMTX_CONF="/etc/mediamtx/mediamtx.yml"
-    elif [ -f ./mediamtx/mediamtx.yml.template ]; then
-        envsubst '${BRB_VIDEO_PATH}' < ./mediamtx/mediamtx.yml.template > /tmp/mediamtx.yml
-        MEDIAMTX_CONF="/tmp/mediamtx.yml"
-    else
-        MEDIAMTX_CONF=""
-    fi
-
-    if command -v mediamtx &> /dev/null && [ -n "$MEDIAMTX_CONF" ]; then
-        echo "Starting MediaMTX binary..."
-        mediamtx "$MEDIAMTX_CONF" > /tmp/mediamtx.log 2>&1 &
-    fi
-
-    echo "Starting MediaMTX Disconnection Protection background process..."
-    python3 /app/noalbs/noalbs.py 2>&1 | tee -a /tmp/disconnection_protection.log &
-fi
+echo "Starting Stream Protection relay supervisor..."
+(
+    while true; do
+        python3 /app/protection/stream_protection.py 2>&1 | tee -a /tmp/stream_protection.log
+        echo "Stream Protection supervisor exited. Restarting in 2s..." | tee -a /tmp/stream_protection.log
+        sleep 2
+    done
+) &
 
 echo "Starting Nginx..."
 exec "$@"

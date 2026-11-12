@@ -159,11 +159,6 @@ def validate():
     if not client_ip or client_ip == '127.0.0.1':
         client_ip = parsed_data.get('addr', [request.remote_addr])[0]
 
-    # Key Check - Internal Cloud BRB stream is always allowed
-    if stream_key_attempt.startswith('cloud_brb'):
-        app.logger.info(f"ACCEPTED cloud_brb stream from {client_ip} (Key: {stream_key_attempt})")
-        return Response('OK', status=200)
-
     # IP Whitelist Check for external streams (VPN/WireGuard/IPv4/IPv6 supported)
     if ACCEPTED_IP and not is_ip_allowed(client_ip, ACCEPTED_IP):
         app.logger.warning(f"REJECTED IP: {client_ip}")
@@ -212,9 +207,6 @@ def publish_done():
         app_name = parsed_data.get('app', [app_name])[0]
         stream_key = parsed_data.get('name', [stream_key])[0]
 
-    if stream_key.startswith('cloud_brb'):
-        return Response('OK', status=200)
-
     pusher_key = f"{app_name}_{stream_key}"
     
     if pusher_key in active_pushers:
@@ -238,13 +230,6 @@ def publish_done():
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    return Response('OK', status=200)
-
-@app.route('/protection_hook', methods=['GET', 'POST'])
-def protection_hook():
-    event = request.args.get('event', '')
-    path = request.args.get('path', '')
-    app.logger.info(f"MediaMTX Protection hook received: event={event}, path={path}")
     return Response('OK', status=200)
 
 @app.route('/yt_video_id', methods=['GET'])

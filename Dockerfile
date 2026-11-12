@@ -6,7 +6,7 @@ ENV NGINX_RTMP_MODULE_VERSION=cookie-nginx-rtmp
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends python3 python3-pip && \
-    pip3 install --break-system-packages flask gunicorn requests obsws-python flask-session twitchio google-api-python-client eventlet flask-socketio edge-tts && \
+    pip3 install --break-system-packages flask gunicorn requests flask-session twitchio google-api-python-client eventlet flask-socketio edge-tts && \
     apt-get install -y --no-install-recommends ca-certificates openssl libssl-dev stunnel4 gettext certbot ffmpeg && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* && \
@@ -60,8 +60,7 @@ COPY nginx/nginx.conf.template /etc/nginx/nginx.conf.template
 COPY stream_validator.py /app/stream_validator.py
 COPY update_titles.py /app/update_titles.py
 COPY tiktok_pusher.py /app/tiktok_pusher.py
-COPY test_noalbs.py /app/test_noalbs.py
-COPY noalbs /app/noalbs
+COPY protection /app/protection
 
 # Config Stunnel
 RUN mkdir -p  /etc/stunnel/conf.d
@@ -71,6 +70,13 @@ COPY stunnel/stunnel4 /etc/default/stunnel4
 
 #Facebook Stunnel Port 19350
 COPY stunnel/facebook.conf /etc/stunnel/conf.d/facebook.conf
+
+#YouTube Stunnel Ports 19355 (primary) and 19357 (backup)
+COPY stunnel/youtube.conf /etc/stunnel/conf.d/youtube.conf
+COPY stunnel/youtube-backup.conf /etc/stunnel/conf.d/youtube-backup.conf
+
+#Twitch Stunnel Port 19353
+COPY stunnel/twitch.conf /etc/stunnel/conf.d/twitch.conf
 
 #Instagram Stunnel Port 19351
 COPY stunnel/instagram.conf /etc/stunnel/conf.d/instagram.conf

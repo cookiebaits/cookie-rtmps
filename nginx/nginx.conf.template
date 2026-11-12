@@ -134,7 +134,7 @@ http {
         }
     }
 
-    # Stats for MediaMTX Disconnection Protection (Internal Port 8081)
+    # Stats for Stream Protection (Internal Port 8081)
     server {
         listen 8081;
         allow 127.0.0.1;
@@ -148,92 +148,19 @@ http {
 }
 
 rtmp {
-    # Internal Cloud BRB / Local publishing server
+    # Internal relay feeds read by the stream protection supervisor (localhost only)
     server {
-        listen 19359;
+        listen 127.0.0.1:19359;
         chunk_size ${CHUNK_SIZE};
 
-        # Facebook Application
-        application facebook {
+        application feed {
             live on;
             record off;
-            on_publish http://127.0.0.1:8080/validate?key=$name;
-            on_publish_done http://127.0.0.1:8080/publish_done;
-            push ${FACEBOOK_URL}${FACEBOOK_KEY};
         }
 
-        # Twitch Application
-        application twitch {
+        application vfeed {
             live on;
             record off;
-            on_publish http://127.0.0.1:8080/validate?key=$name;
-            on_publish_done http://127.0.0.1:8080/publish_done;
-            push ${TWITCH_URL}${TWITCH_KEY};
-        }
-
-        # YouTube Application
-        application youtube {
-            live on;
-            record off;
-            on_publish http://127.0.0.1:8080/validate?key=$name;
-            on_publish_done http://127.0.0.1:8080/publish_done;
-            push ${YOUTUBE_URL}${YOUTUBE_KEY};
-        }
-
-        # Kick Application
-        application kick {
-            live on;
-            record off;
-            on_publish http://127.0.0.1:8080/validate?key=$name;
-            on_publish_done http://127.0.0.1:8080/publish_done;
-            push ${KICK_URL}${KICK_KEY};
-        }
-
-        # X Application
-        application x {
-            live on;
-            record off;
-            on_publish http://127.0.0.1:8080/validate?key=$name;
-            on_publish_done http://127.0.0.1:8080/publish_done;
-            push ${X_URL}${X_KEY};
-        }
-
-        # Generic live application
-        application ${APP_NAME} {
-            live on;
-            record off;
-            on_publish http://127.0.0.1:8080/validate?key=$name;
-            on_publish_done http://127.0.0.1:8080/publish_done;
-
-            #youtube
-            #facebook
-            #instagram
-            #tiktok
-            #kick
-            #x
-            #twitch
-            #trovo
-            #rtmp1
-            #rtmp2
-            #rtmp3
-        }
-
-        # Vertical application
-        application vertical {
-            live on;
-            record off;
-            on_publish http://127.0.0.1:8080/validate?key=$name;
-            on_publish_done http://127.0.0.1:8080/publish_done;
-
-            #v_youtube
-            #v_facebook
-            #v_instagram
-            #v_tiktok
-            #v_kick
-            #v_x
-            #v_twitch
-            #v_trovo
-            #v_rtmp1
         }
     }
 
@@ -298,42 +225,22 @@ rtmp {
             push ${X_URL}${X_KEY};
         }
 
-        # Generic live application
+        # Generic live application: ingest is relayed to the protection feed, which owns all destinations
         application ${APP_NAME} {
             live on;
             record off;
             on_publish http://127.0.0.1:8080/validate?key=$name;
             on_publish_done http://127.0.0.1:8080/publish_done;
-            
-            #youtube
-            #facebook
-            #instagram
-            #tiktok
-            #kick
-            #x
-            #twitch
-            #trovo
-            #rtmp1
-            #rtmp2
-            #rtmp3
+            push rtmp://127.0.0.1:19359/feed;
         }
 
-        # Vertical application
+        # Vertical application: ingest is relayed to the vertical protection feed
         application vertical {
             live on;
             record off;
             on_publish http://127.0.0.1:8080/validate?key=$name;
             on_publish_done http://127.0.0.1:8080/publish_done;
-
-            #v_youtube
-            #v_facebook
-            #v_instagram
-            #v_tiktok
-            #v_kick
-            #v_x
-            #v_twitch
-            #v_trovo
-            #v_rtmp1
+            push rtmp://127.0.0.1:19359/vfeed;
         }
     }
 }

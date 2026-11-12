@@ -72,33 +72,18 @@ PORT_RTMP="1935"
 PORT_HTTP="81"
 PORT_STATS="8081"
 
-# Disconnection Protection Settings (MediaMTX)
-MEDIAMTX_PROTECTION_ENABLED="true"
-NOALBS_ENABLED="true" # Retained for environment backward compatibility
-FALLBACK_MODE="video"
-OBS_WS_HOST="127.0.0.1"
-OBS_WS_PORT="4455"
-OBS_WS_PASSWORD=""
-OBS_SCENE_LIVE="Main"
-OBS_SCENE_BRB="BRB"
+# Disconnection Protection Settings
+PROTECTION_ENABLED="true"
 LOW_BITRATE="1000"
 RESTORE_BITRATE="1500"
-CLOUD_BRB="true"
 BRB_VIDEO_URL=""
-CLOUD_BRB_TIMEOUT="300"
+DISCONNECT_MINUTES="5"
 
 CONFIG_FILE="rtmp_config.env"
 
 # Load saved configuration if it exists
 if [ -f "$CONFIG_FILE" ]; then
     source "$CONFIG_FILE"
-fi
-
-# Ensure both variables stay in sync
-if [ -n "$MEDIAMTX_PROTECTION_ENABLED" ]; then
-    NOALBS_ENABLED="$MEDIAMTX_PROTECTION_ENABLED"
-elif [ -n "$NOALBS_ENABLED" ]; then
-    MEDIAMTX_PROTECTION_ENABLED="$NOALBS_ENABLED"
 fi
 
 if [ -z "$CHAT_HEX_KEY" ]; then
@@ -160,19 +145,11 @@ STREAM_BASE_TITLE="$STREAM_BASE_TITLE"
 TWITCH_CLIENT_ID="$TWITCH_CLIENT_ID"
 TWITCH_OAUTH_TOKEN="$TWITCH_OAUTH_TOKEN"
 TWITCH_BROADCASTER_ID="$TWITCH_BROADCASTER_ID"
-MEDIAMTX_PROTECTION_ENABLED="$MEDIAMTX_PROTECTION_ENABLED"
-NOALBS_ENABLED="$NOALBS_ENABLED"
-FALLBACK_MODE="$FALLBACK_MODE"
-OBS_WS_HOST="$OBS_WS_HOST"
-OBS_WS_PORT="$OBS_WS_PORT"
-OBS_WS_PASSWORD="$OBS_WS_PASSWORD"
-OBS_SCENE_LIVE="$OBS_SCENE_LIVE"
-OBS_SCENE_BRB="$OBS_SCENE_BRB"
+PROTECTION_ENABLED="$PROTECTION_ENABLED"
 LOW_BITRATE="$LOW_BITRATE"
 RESTORE_BITRATE="$RESTORE_BITRATE"
-CLOUD_BRB="$CLOUD_BRB"
 BRB_VIDEO_URL="$BRB_VIDEO_URL"
-CLOUD_BRB_TIMEOUT="$CLOUD_BRB_TIMEOUT"
+DISCONNECT_MINUTES="$DISCONNECT_MINUTES"
 PORT_RTMP="$PORT_RTMP"
 PORT_HTTP="$PORT_HTTP"
 PORT_STATS="$PORT_STATS"
@@ -1172,95 +1149,43 @@ ensure_brb_video_transcoded() {
 configure_disconnection_protection() {
     while true; do
         clear
-        echo -e "${GREEN}=== Disconnection Protection Settings (MediaMTX) ===${NC}"
-        echo -e "Status: $([ "$MEDIAMTX_PROTECTION_ENABLED" == "true" ] && echo -e "${GREEN}ENABLED${NC}" || echo -e "${RED}DISABLED${NC}")"
+        echo -e "${GREEN}=== Disconnection Protection Settings ===${NC}"
+        echo -e "Status: $([ "$PROTECTION_ENABLED" == "true" ] && echo -e "${GREEN}ENABLED${NC}" || echo -e "${RED}DISABLED${NC}")"
+        echo -e "The backup MP4 plays on your destinations when the stream drops or falls below the low bitrate."
         echo ""
-        echo "1) Toggle Enabled (Currently: $MEDIAMTX_PROTECTION_ENABLED)"
-        echo "2) Primary Fallback Mode (Current: ${FALLBACK_MODE:-video} [video = MP4, obs = OBS Scene Switch])"
-        echo "3) OBS WebSocket Host (Current: $OBS_WS_HOST)"
-        echo "4) OBS WebSocket Port (Current: $OBS_WS_PORT)"
-        echo "5) OBS WebSocket Password (Current: ${OBS_WS_PASSWORD:-(None)})"
-        echo "6) Main/Live Scene Name (Current: $OBS_SCENE_LIVE)"
-        echo "7) BRB Scene Name (Current: $OBS_SCENE_BRB)"
-        echo "8) Low Bitrate Threshold (Current: $LOW_BITRATE kbps)"
-        echo "9) Restore Bitrate Threshold (Current: $RESTORE_BITRATE kbps)"
-        echo "10) Toggle Cloud BRB Fallback Video (Currently: $CLOUD_BRB)"
-        echo "11) Configure BRB Video URL (Current: ${BRB_VIDEO_URL:-(None)})"
-        echo "12) Disconnection Protection Duration (Current: ${CLOUD_BRB_TIMEOUT} seconds)"
-        echo "13) Back to Main Menu"
+        echo "1) Toggle Enabled (Currently: $PROTECTION_ENABLED)"
+        echo "2) Low Bitrate Threshold (Current: $LOW_BITRATE kbps)"
+        echo "3) Restore Bitrate Threshold (Current: $RESTORE_BITRATE kbps)"
+        echo "4) Backup Video URL (Current: ${BRB_VIDEO_URL:-(Default)})"
+        echo "5) Disconnection Duration before stream ends (Current: ${DISCONNECT_MINUTES} minutes)"
+        echo "6) Re-download Backup Video"
+        echo "7) Back to Main Menu"
         echo -e "Select an option: \c"
         read -r prot_opt
 
         case $prot_opt in
             1)
-                if [ "$MEDIAMTX_PROTECTION_ENABLED" == "true" ]; then
-                    MEDIAMTX_PROTECTION_ENABLED="false"
-                    NOALBS_ENABLED="false"
-                else
-                    MEDIAMTX_PROTECTION_ENABLED="true"
-                    NOALBS_ENABLED="true"
-                fi
+                if [ "$PROTECTION_ENABLED" == "true" ]; then PROTECTION_ENABLED="false"; else PROTECTION_ENABLED="true"; fi
                 save_config
                 ;;
             2)
-                if [ "$FALLBACK_MODE" == "obs" ]; then
-                    FALLBACK_MODE="video"
-                else
-                    FALLBACK_MODE="obs"
-                fi
-                echo -e "${GREEN}Primary Fallback Mode switched to: $FALLBACK_MODE${NC}"
-                save_config
-                sleep 1
-                ;;
-            3)
-                echo -e "Enter OBS WebSocket Host (e.g. 192.168.1.50 or host.docker.internal):"
-                read -r input
-                if [ ! -z "$input" ]; then OBS_WS_HOST="$input"; save_config; fi
-                ;;
-            4)
-                echo -e "Enter OBS WebSocket Port (Default: 4455):"
-                read -r input
-                if [ ! -z "$input" ]; then OBS_WS_PORT="$input"; save_config; fi
-                ;;
-            5)
-                echo -e "Enter OBS WebSocket Password:"
-                read -r input
-                OBS_WS_PASSWORD="$input"
-                save_config
-                ;;
-            6)
-                echo -e "Enter OBS Main Scene Name (e.g. 'Main' or 'Streaming'):"
-                read -r input
-                if [ ! -z "$input" ]; then OBS_SCENE_LIVE="$input"; save_config; fi
-                ;;
-            7)
-                echo -e "Enter OBS BRB Scene Name (e.g. 'BRB' or 'LowBitrate'):"
-                read -r input
-                if [ ! -z "$input" ]; then OBS_SCENE_BRB="$input"; save_config; fi
-                ;;
-            8)
                 echo -e "Enter Low Bitrate Threshold in kbps (e.g. 1000):"
                 read -r input
-                if [ ! -z "$input" ]; then LOW_BITRATE="$input"; save_config; fi
+                if [[ "$input" =~ ^[0-9]+$ ]]; then LOW_BITRATE="$input"; save_config; else echo -e "${RED}Please enter a number.${NC}"; sleep 1; fi
                 ;;
-            9)
+            3)
                 echo -e "Enter Restore Bitrate Threshold in kbps (e.g. 1500):"
                 read -r input
-                if [ ! -z "$input" ]; then RESTORE_BITRATE="$input"; save_config; fi
+                if [[ "$input" =~ ^[0-9]+$ ]]; then RESTORE_BITRATE="$input"; save_config; else echo -e "${RED}Please enter a number.${NC}"; sleep 1; fi
                 ;;
-            10)
-                if [ "$CLOUD_BRB" == "true" ]; then CLOUD_BRB="false"; else CLOUD_BRB="true"; fi
-                save_config
-                ;;
-            11)
-                echo -e "Enter BRB Video URL (Direct MP4 link, or type 'disable'/'clear' to remove):"
+            4)
+                echo -e "Enter Backup Video URL (Direct MP4 link, or type 'clear' to use the default):"
                 read -r input
-                if [ "$input" == "disable" ] || [ "$input" == "clear" ] || [ "$input" == "DISABLE" ] || [ "$input" == "CLEAR" ]; then
+                if [ "$input" == "clear" ] || [ "$input" == "CLEAR" ]; then
                     BRB_VIDEO_URL=""
                     save_config
-                    rm -f ./data/brb_video.mp4
-                    echo -e "${GREEN}Cleared BRB Video URL and removed cached video.${NC}"
-                    sleep 1
+                    ensure_brb_video_transcoded ""
+                    sleep 2
                 elif [ ! -z "$input" ]; then
                     BRB_VIDEO_URL="$input"
                     save_config
@@ -1268,25 +1193,26 @@ configure_disconnection_protection() {
                     sleep 2
                 fi
                 ;;
-            12)
-                echo -e "Enter Disconnection Video Protection Duration in seconds (e.g. 300):"
+            5)
+                echo -e "Enter how many minutes the backup video may play before the stream ends (e.g. 5):"
                 read -r input
-                if [ ! -z "$input" ]; then
-                    CLOUD_BRB_TIMEOUT="$input"
+                if [[ "$input" =~ ^[0-9]+$ ]] && [ "$input" -gt 0 ]; then
+                    DISCONNECT_MINUTES="$input"
                     save_config
-                    echo -e "${GREEN}Disconnection protection duration updated to $CLOUD_BRB_TIMEOUT seconds.${NC}"
-                    sleep 1
+                    echo -e "${GREEN}Disconnection duration updated to $DISCONNECT_MINUTES minutes.${NC}"
+                else
+                    echo -e "${RED}Please enter a whole number of minutes greater than 0.${NC}"
                 fi
+                sleep 1
                 ;;
-            13) break ;;
+            6)
+                ensure_brb_video_transcoded "$BRB_VIDEO_URL"
+                sleep 2
+                ;;
+            7) break ;;
             *) echo -e "${RED}Invalid option${NC}" ; sleep 1 ;;
         esac
     done
-}
-
-# Alias for backward compatibility
-configure_noalbs() {
-    configure_disconnection_protection
 }
 
 enable_bbr_and_tcp_optimizations() {
@@ -1535,18 +1461,11 @@ build_and_run() {
         -e TWITCH_OAUTH_TOKEN="$TWITCH_OAUTH_TOKEN" \
         -e TWITCH_BROADCASTER_ID="$TWITCH_BROADCASTER_ID" \
         -e SERVER_DOMAIN="$SERVER_DOMAIN" \
-        -e MEDIAMTX_PROTECTION_ENABLED="$MEDIAMTX_PROTECTION_ENABLED" \
-        -e NOALBS_ENABLED="$NOALBS_ENABLED" \
-        -e FALLBACK_MODE="$FALLBACK_MODE" \
-        -e OBS_WS_HOST="$OBS_WS_HOST" \
-        -e OBS_WS_PORT="$OBS_WS_PORT" \
-        -e OBS_WS_PASSWORD="$OBS_WS_PASSWORD" \
-        -e OBS_SCENE_LIVE="$OBS_SCENE_LIVE" \
-        -e OBS_SCENE_BRB="$OBS_SCENE_BRB" \
+        -e PROTECTION_ENABLED="$PROTECTION_ENABLED" \
         -e LOW_BITRATE="$LOW_BITRATE" \
         -e RESTORE_BITRATE="$RESTORE_BITRATE" \
-        -e CLOUD_BRB="$CLOUD_BRB" \
-        -e CLOUD_BRB_TIMEOUT="$CLOUD_BRB_TIMEOUT" \
+        -e BRB_VIDEO_URL="$BRB_VIDEO_URL" \
+        -e DISCONNECT_MINUTES="$DISCONNECT_MINUTES" \
         -v "$(pwd)/data:/app/data" \
         cookie-rtmps
 
@@ -1596,7 +1515,7 @@ view_logs() {
                 fflush()
                 next
             }
-            /MediaMTX|Disconnection Protection|Cloud BRB/ {
+            /Stream Protection|Backup video|Protection/ {
                 print "\033[0;36m" $0 "\033[0m"
                 fflush()
                 next
@@ -1633,106 +1552,91 @@ view_logs() {
 }
 
 deep_cleanup_ports_and_processes() {
-    echo -e "${YELLOW}Cleaning up host processes and unbinding ports (1935, 8080, 8081, 8443, 19350-19360, excluding port 80)...${NC}"
+    echo -e "${YELLOW}Releasing CookieRTMPS ports (1935, 8080, 8081, 8443, 9997, 19350-19359). Ports 80 and 443 are never touched.${NC}"
     if [ "$EUID" -ne 0 ] && command -v sudo &> /dev/null; then
         SUDO="sudo"
     else
         SUDO=""
     fi
 
-    local RAW_PORTS=("$PORT_RTMP" "$PORT_HTTP" "$PORT_STATS" 8080 8081 1935 8443 9997 19360 19350 19351 19352 19353 19354 19355 19356 19357 19358 19359)
-    local PORTS=()
-    for p in "${RAW_PORTS[@]}"; do
-        if [ "$p" != "80" ]; then
-            PORTS+=("$p")
-        fi
-    done
+    local PORTS=(1935 8080 8081 8443 9997 $(seq 19350 19359))
+    local OUR_PROCESSES="nginx|stunnel4|stunnel|gunicorn|ffmpeg|ffprobe|mediamtx|docker-proxy|python3"
 
-    if command -v docker &> /dev/null; then
-        for port in "${PORTS[@]}"; do
+    for port in "${PORTS[@]}"; do
+        if [ "$port" == "80" ] || [ "$port" == "443" ]; then
+            continue
+        fi
+        if command -v docker &> /dev/null; then
             local cids
             cids=$(docker ps -q --filter "publish=$port" 2>/dev/null || true)
             if [ -n "$cids" ]; then
                 docker stop $cids 2>/dev/null || true
                 docker rm -v -f $cids 2>/dev/null || true
             fi
-        done
-    fi
+        fi
 
-    for port in "${PORTS[@]}"; do
-        if command -v fuser &> /dev/null; then
-            $SUDO fuser -k -9 "${port}/tcp" 2>/dev/null || true
-            $SUDO fuser -k -9 "${port}/udp" 2>/dev/null || true
-        fi
-        if command -v lsof &> /dev/null; then
-            local pids
-            pids=$($SUDO lsof -t -i :"$port" 2>/dev/null || true)
-            if [ -n "$pids" ]; then
-                $SUDO kill -9 $pids 2>/dev/null || true
+        local pids
+        pids=$( { $SUDO ss -lptn "sport = :$port" 2>/dev/null | grep -oP 'pid=\K[0-9]+'; $SUDO lsof -t -i :"$port" 2>/dev/null; } | sort -u || true)
+        for pid in $pids; do
+            local comm
+            comm=$(ps -o comm= -p "$pid" 2>/dev/null || true)
+            if [[ "$comm" =~ ^($OUR_PROCESSES)$ ]]; then
+                $SUDO kill -9 "$pid" 2>/dev/null || true
             fi
-        fi
-        if command -v ss &> /dev/null; then
-            local pids
-            pids=$($SUDO ss -lptn "sport = :$port" 2>/dev/null | grep -oP 'pid=\K\d+' | sort -u || true)
-            if [ -n "$pids" ]; then
-                $SUDO kill -9 $pids 2>/dev/null || true
-            fi
-        fi
+        done
     done
 
-    $SUDO pkill -f "tiktok_pusher" 2>/dev/null || true
-    $SUDO pkill -f "mediamtx" 2>/dev/null || true
-    $SUDO pkill -f "noalbs" 2>/dev/null || true
-    $SUDO pkill -f "stream_validator" 2>/dev/null || true
-    $SUDO pkill -f "gunicorn" 2>/dev/null || true
-    $SUDO pkill -f "stunnel" 2>/dev/null || true
-    $SUDO pkill -f "nginx" 2>/dev/null || true
+    $SUDO pkill -9 -f "stream_protection.py" 2>/dev/null || true
+    $SUDO pkill -9 -f "stream_validator:app" 2>/dev/null || true
+    $SUDO pkill -9 -f "tiktok_pusher.py" 2>/dev/null || true
 }
 
 stop_and_uninstall() {
-    if ! command -v docker &> /dev/null; then
-        echo -e "${RED}Docker is not installed!${NC}"
-        sleep 2
-        return
-    fi
-    echo -e "${YELLOW}Stopping services, unbinding all ports, and performing complete removal...${NC}"
-    OLD_CONTAINERS=$(docker ps -a --format '{{.ID}} {{.Names}}' | grep -iE 'rtmp|cookie|prism' | awk '{print $1}')
-    if [ ! -z "$OLD_CONTAINERS" ]; then
-        docker stop $OLD_CONTAINERS 2>/dev/null && echo -e "${GREEN}Containers stopped.${NC}" || true
-        docker rm -v -f $OLD_CONTAINERS 2>/dev/null && echo -e "${GREEN}Containers and volumes removed.${NC}" || true
-    else
-        docker stop cookie-rtmps 2>/dev/null && echo -e "${GREEN}Container stopped.${NC}" || echo -e "${RED}Container not running.${NC}"
-        docker rm -v -f cookie-rtmps 2>/dev/null && echo -e "${GREEN}Container and volumes removed.${NC}" || true
+    echo -e "${YELLOW}Removing CookieRTMPS containers, images, volumes, caches, ports and local files...${NC}"
+
+    if command -v docker &> /dev/null; then
+        OLD_CONTAINERS=$( { docker ps -a --format '{{.ID}} {{.Names}}'; docker ps -a --format '{{.ID}} {{.Image}}'; } | grep -iE 'rtmp|cookie|prism' | awk '{print $1}' | sort -u || true)
+        if [ -n "$OLD_CONTAINERS" ]; then
+            docker stop $OLD_CONTAINERS 2>/dev/null || true
+            docker rm -v -f $OLD_CONTAINERS 2>/dev/null && echo -e "${GREEN}Containers and their volumes removed.${NC}" || true
+        else
+            echo -e "${YELLOW}No CookieRTMPS containers found.${NC}"
+        fi
+
+        OLD_VOLUMES=$(docker volume ls -q | grep -iE 'rtmp|cookie|prism' || true)
+        if [ -n "$OLD_VOLUMES" ]; then
+            docker volume rm -f $OLD_VOLUMES 2>/dev/null && echo -e "${GREEN}Matching Docker volumes removed.${NC}" || true
+        fi
+
+        OLD_IMAGES=$(docker images --format '{{.ID}} {{.Repository}}:{{.Tag}}' | grep -iE 'rtmp|cookie|prism' | awk '{print $1}' | sort -u || true)
+        if [ -n "$OLD_IMAGES" ]; then
+            docker rmi -f $OLD_IMAGES 2>/dev/null && echo -e "${GREEN}Matching images removed.${NC}" || true
+        fi
+
+        echo -e "${YELLOW}Pruning dangling images and Docker build cache...${NC}"
+        docker image prune -f 2>/dev/null || true
+        docker builder prune -a -f 2>/dev/null || true
     fi
 
-    echo -e "${YELLOW}Unbinding all ports and killing associated processes...${NC}"
     deep_cleanup_ports_and_processes
 
-    OLD_VOLUMES=$(docker volume ls -q | grep -iE 'rtmp|cookie|prism' || true)
-    if [ ! -z "$OLD_VOLUMES" ]; then
-        docker volume rm -f $OLD_VOLUMES 2>/dev/null && echo -e "${GREEN}Matching Docker volumes removed.${NC}" || true
-    fi
-
-    OLD_IMAGES=$(docker images --format '{{.ID}} {{.Repository}}' | grep -iE 'rtmp|cookie|prism' | awk '{print $1}')
-    if [ ! -z "$OLD_IMAGES" ]; then
-        docker rmi -f $OLD_IMAGES 2>/dev/null && echo -e "${GREEN}Images removed.${NC}" || true
-    else
-        docker rmi -f cookie-rtmps 2>/dev/null && echo -e "${GREEN}Image removed.${NC}" || true
-    fi
-
-    echo -e "${YELLOW}Pruning Docker build cache, volumes, networks, and unused images...${NC}"
-    docker volume prune -f 2>/dev/null || true
-    docker network prune -f 2>/dev/null || true
-    docker image prune -a -f 2>/dev/null || true
-    docker builder prune -a -f 2>/dev/null || true
-    docker system prune -a -f 2>/dev/null || true
-
-    echo -e "${YELLOW}Removing local configuration files and data cache...${NC}"
+    echo -e "${YELLOW}Removing local configuration, cached video, logs and system tuning...${NC}"
     rm -f rtmp_config.env
     rm -rf ./data
-    echo -e "${GREEN}Local configuration and data removed.${NC}"
+    rm -f /tmp/validator.log /tmp/stream_protection.log /tmp/stream_disconnected.signal
+    rm -f /tmp/disconnection_test.log /tmp/cloud_brb.log /tmp/mediamtx.log /tmp/mediamtx.yml
+    rm -f /tmp/disconnection_protection.log /tmp/tiktok_pusher*.log
+    if [ "$EUID" -ne 0 ] && command -v sudo &> /dev/null; then
+        SUDO="sudo"
+    else
+        SUDO=""
+    fi
+    if [ -f /etc/sysctl.d/99-stream-optimization.conf ]; then
+        $SUDO rm -f /etc/sysctl.d/99-stream-optimization.conf
+        $SUDO sysctl --system > /dev/null 2>&1 || true
+    fi
 
-    echo -e "${GREEN}CookieRTMPS and all cached components have been completely uninstalled and all ports unbound.${NC}"
+    echo -e "${GREEN}CookieRTMPS has been completely uninstalled. Ports 80 and 443 were left untouched.${NC}"
     sleep 3
 }
 

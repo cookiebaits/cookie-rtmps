@@ -21,7 +21,7 @@ This project includes performance tuning (optimized `chunk_size`), updated core 
 
 ### Key Features
 *   **Server IP & VPN/WireGuard Auto-Whitelisting:** Configure an IP Whitelist dynamically with full support for single IPv4/IPv6 addresses and CIDR subnets for WireGuard, VPNs, or proxy tunnels.
-*   **MediaMTX Disconnection Protection & Cloud BRB Integration:** Automatic bitrate monitoring to dynamically trigger fallback `.mp4` video looping and OBS scene switching on stream disconnects or low bitrate—enabled by default for maximum stream stability.
+*   **Server-Side Disconnection Protection:** When the source drops below your set bitrate or disconnects for your set number of minutes, the server plays a backup MP4 to all destinations (RTMP and RTMPS) and switches back to live automatically when the source recovers. No OBS is needed on the server.
 *   **Vertical Streaming Support:** Optimized for use with the **OBS Aitum Vertical plugin**. Push a second, independent vertical feed to specialized targets (TikTok, YouTube Vertical, Twitch Vertical) alongside your horizontal stream.
 *   **Automated Stream Titles:** Automatically set and update your stream titles in the format: `Base Title / Episode # / Date`. Episode numbers are persisted and increment automatically! (Current support: Twitch API).
 *   **Aggressive Cleanup & Testing:** Built-in scripts to aggressively purge old Docker instances to avoid port conflicts and ensure smooth upgrades, backed by instant integration testing.
