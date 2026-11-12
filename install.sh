@@ -72,9 +72,8 @@ PORT_RTMP="1935"
 PORT_HTTP="81"
 PORT_STATS="8081"
 
-# Disconnection Protection Settings (MediaMTX)
-MEDIAMTX_PROTECTION_ENABLED="true"
-NOALBS_ENABLED="true" # Retained for environment backward compatibility
+# NOALBS Settings
+NOALBS_ENABLED="true"
 FALLBACK_MODE="video"
 OBS_WS_HOST="127.0.0.1"
 OBS_WS_PORT="4455"
@@ -85,20 +84,12 @@ LOW_BITRATE="1000"
 RESTORE_BITRATE="1500"
 CLOUD_BRB="true"
 BRB_VIDEO_URL=""
-CLOUD_BRB_TIMEOUT="300"
 
 CONFIG_FILE="rtmp_config.env"
 
 # Load saved configuration if it exists
 if [ -f "$CONFIG_FILE" ]; then
     source "$CONFIG_FILE"
-fi
-
-# Ensure both variables stay in sync
-if [ -n "$MEDIAMTX_PROTECTION_ENABLED" ]; then
-    NOALBS_ENABLED="$MEDIAMTX_PROTECTION_ENABLED"
-elif [ -n "$NOALBS_ENABLED" ]; then
-    MEDIAMTX_PROTECTION_ENABLED="$NOALBS_ENABLED"
 fi
 
 if [ -z "$CHAT_HEX_KEY" ]; then
@@ -160,7 +151,6 @@ STREAM_BASE_TITLE="$STREAM_BASE_TITLE"
 TWITCH_CLIENT_ID="$TWITCH_CLIENT_ID"
 TWITCH_OAUTH_TOKEN="$TWITCH_OAUTH_TOKEN"
 TWITCH_BROADCASTER_ID="$TWITCH_BROADCASTER_ID"
-MEDIAMTX_PROTECTION_ENABLED="$MEDIAMTX_PROTECTION_ENABLED"
 NOALBS_ENABLED="$NOALBS_ENABLED"
 FALLBACK_MODE="$FALLBACK_MODE"
 OBS_WS_HOST="$OBS_WS_HOST"
@@ -172,7 +162,6 @@ LOW_BITRATE="$LOW_BITRATE"
 RESTORE_BITRATE="$RESTORE_BITRATE"
 CLOUD_BRB="$CLOUD_BRB"
 BRB_VIDEO_URL="$BRB_VIDEO_URL"
-CLOUD_BRB_TIMEOUT="$CLOUD_BRB_TIMEOUT"
 PORT_RTMP="$PORT_RTMP"
 PORT_HTTP="$PORT_HTTP"
 PORT_STATS="$PORT_STATS"
@@ -206,12 +195,14 @@ get_alternative_url() {
     case $platform in
         "youtube")
             if [[ "$current_url" == *"x.rtmp.youtube.com"* ]] || [[ "$current_url" == *"a.rtmp.youtube.com"* ]] || [[ "$current_url" == *"127.0.0.1:19355"* ]]; then
+                # It is a primary URL, return the corresponding backup URL
                 if [[ "$current_url" == *"127.0.0.1"* ]]; then
                     echo "rtmp://127.0.0.1:19357/live2?backup=1"
                 else
                     echo "rtmp://b.rtmp.youtube.com/live2?backup=1"
                 fi
             else
+                # It is a backup URL or something else, return the corresponding primary URL
                 if [[ "$current_url" == *"127.0.0.1"* ]]; then
                     echo "rtmp://127.0.0.1:19355/live2/"
                 else
@@ -220,16 +211,20 @@ get_alternative_url() {
             fi
             ;;
         "twitch")
+            # If it is using the global ingest, switch to US East (Ashburn) as a reliable alternative
             if [[ "$current_url" == *"ingest.global"* ]]; then
                 echo "rtmp://use10.contribute.live-video.net/app/"
             else
+                # If it is using a regional ingest, switch to the global ingest
                 echo "rtmp://ingest.global-contribute.live-video.net/app/"
             fi
             ;;
         "kick")
+            # If it is using standard/secure, switch to the South Africa relay as an alternative
             if [[ "$current_url" == *"live.kick.com"* ]] || [[ "$current_url" == *"127.0.0.1:19356"* ]]; then
                 echo "rtmp://kick.cisp.co.za/live"
             else
+                # Otherwise switch to the secure global endpoint
                 echo "rtmp://127.0.0.1:19356/kick/"
             fi
             ;;
@@ -748,7 +743,10 @@ configure_vertical_keys() {
 configure_obs() {
     clear
     echo -e "${GREEN}=== OBS Configuration ===${NC}"
+    # Determine the public IP if possible, or fallback to placeholder
     SERVER_IP=$(curl -4 -s ifconfig.me || echo "<your_server_ip>")
+
+    # Use Domain if set, otherwise IP
     DISPLAY_HOST=${SERVER_DOMAIN:-$SERVER_IP}
 
     echo -e "To stream to this server from OBS or another encoder:"
@@ -780,6 +778,7 @@ configure_obs() {
     echo -e "(Leave blank to keep current):"
     read -r app_input
     if [ ! -z "$app_input" ]; then
+        # Basic sanitization: remove everything except alphanumeric
         app_input=$(echo "$app_input" | sed 's/[^a-zA-Z0-9]//g')
         if [ ! -z "$app_input" ]; then
             APP_NAME="$app_input"
@@ -804,6 +803,7 @@ configure_domain() {
         SERVER_DOMAIN=""
         echo -e "${GREEN}Domain disabled, using IP.${NC}"
     elif [ ! -z "$dom_input" ]; then
+        # Basic sanitization for domain
         dom_input=$(echo "$dom_input" | sed 's/[^a-zA-Z0-9.-]//g')
         if [ ! -z "$dom_input" ]; then
             SERVER_DOMAIN="$dom_input"
@@ -817,176 +817,48 @@ configure_domain() {
     sleep 2
 }
 
-append_to_ip_whitelist() {
-    local new_entries="$1"
-    if [ -z "$new_entries" ]; then
-        return
-    fi
-    if [ -z "$ACCEPTED_IP" ]; then
-        ACCEPTED_IP="$new_entries"
-    else
-        # Split, merge and deduplicate
-        local combined="${ACCEPTED_IP},${new_entries}"
-        local deduped=""
-        IFS=',' read -ra ADDR <<< "$combined"
-        for item in "${ADDR[@]}"; do
-            local clean_item
-            clean_item=$(echo "$item" | xargs)
-            if [ -n "$clean_item" ]; then
-                if [[ ",$deduped," != *",$clean_item,"* ]]; then
-                    if [ -z "$deduped" ]; then
-                        deduped="$clean_item"
-                    else
-                        deduped="${deduped},${clean_item}"
-                    fi
-                fi
-            fi
-        done
-        ACCEPTED_IP="$deduped"
-    fi
-}
-
 configure_whitelist() {
     while true; do
         clear
         echo -e "${GREEN}=== IP Whitelist Configuration ===${NC}"
-        echo -e "Current Accepted IP / Subnets:"
-        if [ -z "$ACCEPTED_IP" ]; then
-            echo -e "  ${YELLOW}None (Allow All)${NC}"
-        else
-            echo -e "  ${YELLOW}${ACCEPTED_IP}${NC}"
-        fi
+        echo -e "Current Accepted IP: ${YELLOW}${ACCEPTED_IP:-None (Allow All)}${NC}"
         echo ""
-        echo "1) Server IP & Auto-detect VPN/WireGuard Subnets"
-        echo "2) Add / Configure VPN & WireGuard Subnets (e.g. 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, WireGuard)"
-        echo "3) Manual IP Address or CIDR Subnet (Append or Replace)"
-        echo "4) Clear IP Whitelist (Allow All)"
-        echo "5) Back to Main Menu"
+        echo "1) Server's IP Address (For those who proxy, VPN or Wireguard Into the Server)"
+        echo "2) Manual IP Address"
+        echo "3) Clear IP Address"
+        echo "4) Back to Main Menu"
         echo -e "Select an option: \c"
         read -r wl_opt
 
         case $wl_opt in
             1)
                 SERVER_IP_FETCH=$(curl -4 -s ifconfig.me || echo "")
-                DETECTED_NETWORKS=""
-                # Check for active wireguard / vpn interfaces (wg*, tun*, tap*)
-                if command -v ip &> /dev/null; then
-                    DETECTED_NETWORKS=$(ip -o -4 addr show 2>/dev/null | awk '$2 ~ /^(wg|tun|tap)/ {print $4}' | paste -sd, -)
-                fi
-                if [ -z "$DETECTED_NETWORKS" ] && [ -d "/etc/wireguard" ]; then
-                    DETECTED_NETWORKS=$(grep -h -oP '(?<=Address\s*=\s*)[0-9a-fA-F:./]+' /etc/wireguard/*.conf 2>/dev/null | paste -sd, - || true)
-                fi
-
-                NEW_LIST=""
-                if [ -n "$SERVER_IP_FETCH" ]; then
-                    NEW_LIST="$SERVER_IP_FETCH"
-                fi
-                if [ -n "$DETECTED_NETWORKS" ]; then
-                    echo -e "${GREEN}Detected active VPN/WireGuard interface subnet(s): $DETECTED_NETWORKS${NC}"
-                    if [ -n "$NEW_LIST" ]; then
-                        NEW_LIST="${NEW_LIST},${DETECTED_NETWORKS}"
-                    else
-                        NEW_LIST="$DETECTED_NETWORKS"
-                    fi
+                if [ ! -z "$SERVER_IP_FETCH" ]; then
+                    ACCEPTED_IP="$SERVER_IP_FETCH"
+                    echo -e "${GREEN}IP Whitelist updated to server IP: $ACCEPTED_IP${NC}"
                 else
-                    echo -e "${YELLOW}No active WireGuard/VPN interface auto-detected.${NC}"
-                    echo -e "Would you like to include default WireGuard client subnet (10.8.0.0/24)? [y/N]: \c"
-                    read -r wg_yn
-                    if [[ "$wg_yn" =~ ^[Yy]$ ]]; then
-                        if [ -n "$NEW_LIST" ]; then
-                            NEW_LIST="${NEW_LIST},10.8.0.0/24"
-                        else
-                            NEW_LIST="10.8.0.0/24"
-                        fi
-                    fi
-                fi
-
-                echo ""
-                echo "1) Replace existing whitelist with: $NEW_LIST"
-                echo "2) Append to existing whitelist"
-                echo -e "Choice [1]: \c"
-                read -r app_choice
-                if [ "$app_choice" == "2" ]; then
-                    append_to_ip_whitelist "$NEW_LIST"
-                else
-                    ACCEPTED_IP="$NEW_LIST"
+                    echo -e "${RED}Failed to fetch server IP.${NC}"
                 fi
                 save_config
-                echo -e "${GREEN}IP Whitelist updated to: $ACCEPTED_IP${NC}"
                 sleep 2
                 ;;
             2)
-                echo -e "\n${YELLOW}=== VPN & WireGuard Subnet Presets ===${NC}"
-                echo "1) Standard WireGuard Subnet (10.8.0.0/24)"
-                echo "2) Entire 10.0.0.0/8 Network (VPN/Internal)"
-                echo "3) Entire 172.16.0.0/12 Network (Docker/VPN)"
-                echo "4) Entire 192.168.0.0/16 Network (LAN/VPN)"
-                echo "5) All Private Networks + WireGuard (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16)"
-                echo "6) Custom Subnet CIDR (e.g. 10.18.0.0/24 or IPv6 prefix)"
-                echo -e "Select preset: \c"
-                read -r vpn_opt
-
-                TARGET_SUBNET=""
-                case $vpn_opt in
-                    1) TARGET_SUBNET="10.8.0.0/24" ;;
-                    2) TARGET_SUBNET="10.0.0.0/8" ;;
-                    3) TARGET_SUBNET="172.16.0.0/12" ;;
-                    4) TARGET_SUBNET="192.168.0.0/16" ;;
-                    5) TARGET_SUBNET="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16" ;;
-                    6)
-                        echo -e "Enter custom subnet CIDR: \c"
-                        read -r TARGET_SUBNET
-                        ;;
-                    *)
-                        echo -e "${RED}Invalid selection.${NC}"
-                        sleep 1
-                        continue
-                        ;;
-                esac
-
-                if [ -n "$TARGET_SUBNET" ]; then
-                    echo ""
-                    echo "1) Append to existing whitelist"
-                    echo "2) Replace entire whitelist"
-                    echo -e "Choice [1]: \c"
-                    read -r mode_opt
-                    if [ "$mode_opt" == "2" ]; then
-                        ACCEPTED_IP="$TARGET_SUBNET"
-                    else
-                        append_to_ip_whitelist "$TARGET_SUBNET"
-                    fi
-                    save_config
-                    echo -e "${GREEN}IP Whitelist updated to: $ACCEPTED_IP${NC}"
-                    sleep 2
-                fi
-                ;;
-            3)
-                echo -e "Enter IP address(es) or CIDR subnet(s) to whitelist (comma-separated, IPv4 & IPv6 supported):"
-                echo -e "${YELLOW}Example: 10.0.0.0/8,10.18.0.1,127.0.0.1,172.16.0.0/12,172.17.0.1,192.168.0.0/16,217.196.51.37,2a02:4780:10:cbe0::1${NC}"
-                echo -e "Input: \c"
+                echo -e "Enter IP address to whitelist: \c"
                 read -r ip_input
                 if [ ! -z "$ip_input" ]; then
-                    echo "1) Append to current list"
-                    echo "2) Replace current list"
-                    echo -e "Choice [1]: \c"
-                    read -r add_choice
-                    if [ "$add_choice" == "2" ]; then
-                        ACCEPTED_IP="$ip_input"
-                    else
-                        append_to_ip_whitelist "$ip_input"
-                    fi
+                    ACCEPTED_IP="$ip_input"
                     echo -e "${GREEN}IP Whitelist updated to: $ACCEPTED_IP${NC}"
                     save_config
                 fi
                 sleep 2
                 ;;
-            4)
+            3)
                 ACCEPTED_IP=""
-                echo -e "${GREEN}IP Whitelist cleared. All incoming client IPs allowed.${NC}"
+                echo -e "${GREEN}IP Whitelist disabled. All IPs allowed.${NC}"
                 save_config
                 sleep 2
                 ;;
-            5|"")
+            4|"")
                 break
                 ;;
             *)
@@ -1169,13 +1041,13 @@ ensure_brb_video_transcoded() {
     fi
 }
 
-configure_disconnection_protection() {
+configure_noalbs() {
     while true; do
         clear
-        echo -e "${GREEN}=== Disconnection Protection Settings (MediaMTX) ===${NC}"
-        echo -e "Status: $([ "$MEDIAMTX_PROTECTION_ENABLED" == "true" ] && echo -e "${GREEN}ENABLED${NC}" || echo -e "${RED}DISABLED${NC}")"
+        echo -e "${GREEN}=== NOALBS Scene Switcher Configuration ===${NC}"
+        echo -e "Status: $([ "$NOALBS_ENABLED" == "true" ] && echo -e "${GREEN}ENABLED${NC}" || echo -e "${RED}DISABLED${NC}")"
         echo ""
-        echo "1) Toggle Enabled (Currently: $MEDIAMTX_PROTECTION_ENABLED)"
+        echo "1) Toggle Enabled (Currently: $NOALBS_ENABLED)"
         echo "2) Primary Fallback Mode (Current: ${FALLBACK_MODE:-video} [video = MP4, obs = OBS Scene Switch])"
         echo "3) OBS WebSocket Host (Current: $OBS_WS_HOST)"
         echo "4) OBS WebSocket Port (Current: $OBS_WS_PORT)"
@@ -1184,22 +1056,15 @@ configure_disconnection_protection() {
         echo "7) BRB Scene Name (Current: $OBS_SCENE_BRB)"
         echo "8) Low Bitrate Threshold (Current: $LOW_BITRATE kbps)"
         echo "9) Restore Bitrate Threshold (Current: $RESTORE_BITRATE kbps)"
-        echo "10) Toggle Cloud BRB Fallback Video (Currently: $CLOUD_BRB)"
+        echo "10) Toggle Cloud BRB (Currently: $CLOUD_BRB)"
         echo "11) Configure BRB Video URL (Current: ${BRB_VIDEO_URL:-(None)})"
-        echo "12) Disconnection Protection Duration (Current: ${CLOUD_BRB_TIMEOUT} seconds)"
-        echo "13) Back to Main Menu"
+        echo "12) Back to Main Menu"
         echo -e "Select an option: \c"
-        read -r prot_opt
+        read -r noalbs_opt
 
-        case $prot_opt in
+        case $noalbs_opt in
             1)
-                if [ "$MEDIAMTX_PROTECTION_ENABLED" == "true" ]; then
-                    MEDIAMTX_PROTECTION_ENABLED="false"
-                    NOALBS_ENABLED="false"
-                else
-                    MEDIAMTX_PROTECTION_ENABLED="true"
-                    NOALBS_ENABLED="true"
-                fi
+                if [ "$NOALBS_ENABLED" == "true" ]; then NOALBS_ENABLED="false"; else NOALBS_ENABLED="true"; fi
                 save_config
                 ;;
             2)
@@ -1268,25 +1133,10 @@ configure_disconnection_protection() {
                     sleep 2
                 fi
                 ;;
-            12)
-                echo -e "Enter Disconnection Video Protection Duration in seconds (e.g. 300):"
-                read -r input
-                if [ ! -z "$input" ]; then
-                    CLOUD_BRB_TIMEOUT="$input"
-                    save_config
-                    echo -e "${GREEN}Disconnection protection duration updated to $CLOUD_BRB_TIMEOUT seconds.${NC}"
-                    sleep 1
-                fi
-                ;;
-            13) break ;;
+            12) break ;;
             *) echo -e "${RED}Invalid option${NC}" ; sleep 1 ;;
         esac
     done
-}
-
-# Alias for backward compatibility
-configure_noalbs() {
-    configure_disconnection_protection
 }
 
 enable_bbr_and_tcp_optimizations() {
@@ -1338,6 +1188,7 @@ install_docker() {
     echo -e "${GREEN}Checking for Docker...${NC}"
     if ! command -v docker &> /dev/null; then
         echo -e "${YELLOW}Docker not found. Installing...${NC}"
+        # Basic docker install via official script
         curl -4 -fsSL https://get.docker.com -o get-docker.sh
         sudo sh get-docker.sh
         sudo systemctl start docker
@@ -1357,7 +1208,7 @@ check_port() {
     elif command -v netstat &> /dev/null; then
         netstat -tuln | grep -q ":$port "
     else
-        return 1
+        return 1 # Cannot check
     fi
 }
 
@@ -1410,7 +1261,8 @@ build_and_run() {
         echo -e "${GREEN}No port conflicts detected.${NC}"
     fi
 
-    # Auto-fill vertical from horizontal if horizontal is set but vertical is not
+    # Auto-fill vertical from horizontal if horizontal is set but vertical is not (YouTube, Twitch, TikTok, Kick)
+    # Automatically chooses an alternative ingest server to avoid conflicts
     if [ ! -z "$YOUTUBE_KEY" ] && [ -z "$V_YOUTUBE_KEY" ]; then
         V_YOUTUBE_KEY="$YOUTUBE_KEY"
         V_YOUTUBE_URL=$(get_alternative_url "youtube" "$YOUTUBE_URL")
@@ -1424,6 +1276,7 @@ build_and_run() {
         V_KICK_URL=$(get_alternative_url "kick" "$KICK_URL")
     fi
 
+    # Hard Enforcement: Always ensure horizontal and vertical ingest URLs are different for YT, Twitch, Kick
     if [ ! -z "$YOUTUBE_KEY" ] && [ "$YOUTUBE_URL" == "$V_YOUTUBE_URL" ]; then
         V_YOUTUBE_URL=$(get_alternative_url "youtube" "$V_YOUTUBE_URL")
     fi
@@ -1478,11 +1331,13 @@ build_and_run() {
 
     echo -e "${GREEN}Starting container...${NC}"
 
+    # Port mapping logic: Map HTTP/HTTPS only if domain is set
     PORT_MAPS="-p ${PORT_RTMP}:1935"
     if [ ! -z "$SERVER_DOMAIN" ]; then
         PORT_MAPS="$PORT_MAPS -p ${PORT_HTTP}:80"
     fi
 
+    # Start the container
     docker run -d --name cookie-rtmps \
         $PORT_MAPS \
         --restart unless-stopped \
@@ -1535,7 +1390,6 @@ build_and_run() {
         -e TWITCH_OAUTH_TOKEN="$TWITCH_OAUTH_TOKEN" \
         -e TWITCH_BROADCASTER_ID="$TWITCH_BROADCASTER_ID" \
         -e SERVER_DOMAIN="$SERVER_DOMAIN" \
-        -e MEDIAMTX_PROTECTION_ENABLED="$MEDIAMTX_PROTECTION_ENABLED" \
         -e NOALBS_ENABLED="$NOALBS_ENABLED" \
         -e FALLBACK_MODE="$FALLBACK_MODE" \
         -e OBS_WS_HOST="$OBS_WS_HOST" \
@@ -1546,7 +1400,6 @@ build_and_run() {
         -e LOW_BITRATE="$LOW_BITRATE" \
         -e RESTORE_BITRATE="$RESTORE_BITRATE" \
         -e CLOUD_BRB="$CLOUD_BRB" \
-        -e CLOUD_BRB_TIMEOUT="$CLOUD_BRB_TIMEOUT" \
         -v "$(pwd)/data:/app/data" \
         cookie-rtmps
 
@@ -1562,6 +1415,7 @@ build_and_run() {
         docker restart cookie-rtmps
         sleep 3
 
+        # Run Integration Tests
         if [ -f "./integration_test.sh" ]; then
             chmod +x ./integration_test.sh
             ./integration_test.sh
@@ -1582,6 +1436,7 @@ view_logs() {
 
     echo -e "${YELLOW}Showing live logs for cookie-rtmps (Filtering /stat polling requests)...${NC}"
     echo -e "${YELLOW}(Press Ctrl+C to exit log view)${NC}\n"
+    # Use a subshell and trap INT to ensure script doesn't exit on Ctrl+C
     (
         trap 'exit 0' INT
         docker logs --since 24h -f cookie-rtmps 2>&1 | awk '
@@ -1596,7 +1451,7 @@ view_logs() {
                 fflush()
                 next
             }
-            /MediaMTX|Disconnection Protection|Cloud BRB/ {
+            /NOALBS|Cloud BRB/ {
                 print "\033[0;36m" $0 "\033[0m"
                 fflush()
                 next
@@ -1619,7 +1474,9 @@ view_logs() {
             1) break ;;
             2)
                 echo -e "${YELLOW}Clearing logs...${NC}"
+                # Truncate internal logs
                 docker exec cookie-rtmps sh -c 'truncate -s 0 /var/log/nginx/access.log /var/log/nginx/error.log' 2>/dev/null || true
+                # Truncate Docker's own log file for the container
                 LOG_PATH=$(docker inspect --format='{{.LogPath}}' cookie-rtmps 2>/dev/null)
                 if [ ! -z "$LOG_PATH" ]; then
                     sudo truncate -s 0 "$LOG_PATH" 2>/dev/null || truncate -s 0 "$LOG_PATH" 2>/dev/null || echo -e "${RED}Failed to truncate Docker log file. You may need sudo.${NC}"
@@ -1632,26 +1489,55 @@ view_logs() {
     done
 }
 
+# Safeguard against touching sensitive/standard system ports
+is_protected_port() {
+    local port="$1"
+    case "$port" in
+        ""|20|21|22|25|53|80|110|143|443|465|587|993|995|3306|5432|6379|27017)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 deep_cleanup_ports_and_processes() {
-    echo -e "${YELLOW}Cleaning up host processes and unbinding ports (1935, 8080, 8081, 8443, 19350-19360, excluding port 80)...${NC}"
+    echo -e "${YELLOW}Deep scanning and unbinding RTMPS/Stunnel/Stats ports (strictly protecting 22, 53, 80, 443, etc.)...${NC}"
     if [ "$EUID" -ne 0 ] && command -v sudo &> /dev/null; then
         SUDO="sudo"
     else
         SUDO=""
     fi
 
-    local RAW_PORTS=("$PORT_RTMP" "$PORT_HTTP" "$PORT_STATS" 8080 8081 1935 8443 9997 19360 19350 19351 19352 19353 19354 19355 19356 19357 19358 19359)
+    local RAW_PORTS=(
+        "$PORT_RTMP" "$PORT_HTTP" "$PORT_STATS"
+        81 1935 1936 8080 8081 8443
+        19350 19351 19352 19353 19354 19355 19356 19357 19358 19359
+    )
+
     local PORTS=()
     for p in "${RAW_PORTS[@]}"; do
-        if [ "$p" != "80" ]; then
-            PORTS+=("$p")
+        if ! is_protected_port "$p"; then
+            # Deduplicate port list
+            local exists=0
+            for existing in "${PORTS[@]}"; do
+                if [ "$existing" == "$p" ]; then
+                    exists=1
+                    break
+                fi
+            done
+            if [ $exists -eq 0 ]; then
+                PORTS+=("$p")
+            fi
         fi
     done
 
+    # 1. Stop and remove any Docker containers publishing target non-sensitive ports
     if command -v docker &> /dev/null; then
         for port in "${PORTS[@]}"; do
             local cids
-            cids=$(docker ps -q --filter "publish=$port" 2>/dev/null || true)
+            cids=$(docker ps -a -q --filter "publish=$port" 2>/dev/null || true)
             if [ -n "$cids" ]; then
                 docker stop $cids 2>/dev/null || true
                 docker rm -v -f $cids 2>/dev/null || true
@@ -1659,7 +1545,11 @@ deep_cleanup_ports_and_processes() {
         done
     fi
 
+    # 2. Release ports held by host processes using fuser, lsof, and ss
     for port in "${PORTS[@]}"; do
+        if is_protected_port "$port"; then
+            continue
+        fi
         if command -v fuser &> /dev/null; then
             $SUDO fuser -k -9 "${port}/tcp" 2>/dev/null || true
             $SUDO fuser -k -9 "${port}/udp" 2>/dev/null || true
@@ -1673,66 +1563,105 @@ deep_cleanup_ports_and_processes() {
         fi
         if command -v ss &> /dev/null; then
             local pids
-            pids=$($SUDO ss -lptn "sport = :$port" 2>/dev/null | grep -oP 'pid=\K\d+' | sort -u || true)
+            pids=$($SUDO ss -lptun "sport = :$port" 2>/dev/null | grep -oP 'pid=\K\d+' | sort -u || true)
             if [ -n "$pids" ]; then
                 $SUDO kill -9 $pids 2>/dev/null || true
             fi
         fi
     done
 
-    $SUDO pkill -f "tiktok_pusher" 2>/dev/null || true
-    $SUDO pkill -f "mediamtx" 2>/dev/null || true
-    $SUDO pkill -f "noalbs" 2>/dev/null || true
-    $SUDO pkill -f "stream_validator" 2>/dev/null || true
-    $SUDO pkill -f "gunicorn" 2>/dev/null || true
-    $SUDO pkill -f "stunnel" 2>/dev/null || true
-    $SUDO pkill -f "nginx" 2>/dev/null || true
+    # 3. Terminate orphaned RTMPS-specific processes on the host without touching system web servers on 80/443
+    $SUDO pkill -9 -f "tiktok_pusher" 2>/dev/null || true
+    $SUDO pkill -9 -f "noalbs" 2>/dev/null || true
+    $SUDO pkill -9 -f "stream_validator" 2>/dev/null || true
+    $SUDO pkill -9 -f "update_titles" 2>/dev/null || true
+    $SUDO pkill -9 -f "cookie-nginx-rtmp" 2>/dev/null || true
+    $SUDO pkill -9 -f "brb_video.mp4" 2>/dev/null || true
 }
 
 stop_and_uninstall() {
-    if ! command -v docker &> /dev/null; then
-        echo -e "${RED}Docker is not installed!${NC}"
-        sleep 2
-        return
-    fi
-    echo -e "${YELLOW}Stopping services, unbinding all ports, and performing complete removal...${NC}"
-    OLD_CONTAINERS=$(docker ps -a --format '{{.ID}} {{.Names}}' | grep -iE 'rtmp|cookie|prism' | awk '{print $1}')
-    if [ ! -z "$OLD_CONTAINERS" ]; then
-        docker stop $OLD_CONTAINERS 2>/dev/null && echo -e "${GREEN}Containers stopped.${NC}" || true
-        docker rm -v -f $OLD_CONTAINERS 2>/dev/null && echo -e "${GREEN}Containers and volumes removed.${NC}" || true
+    if [ "$EUID" -ne 0 ] && command -v sudo &> /dev/null; then
+        SUDO="sudo"
     else
-        docker stop cookie-rtmps 2>/dev/null && echo -e "${GREEN}Container stopped.${NC}" || echo -e "${RED}Container not running.${NC}"
-        docker rm -v -f cookie-rtmps 2>/dev/null && echo -e "${GREEN}Container and volumes removed.${NC}" || true
+        SUDO=""
     fi
 
-    echo -e "${YELLOW}Unbinding all ports and killing associated processes...${NC}"
+    echo -e "${YELLOW}Starting deep uninstallation of CookieRTMPS containers, images, cached assets, and ports...${NC}"
+
+    if command -v docker &> /dev/null; then
+        # 1. Deep search for containers by name, image, or command matching rtmp/cookie/prism/noalbs/stunnel
+        echo -e "${YELLOW}Searching for all related Docker containers...${NC}"
+        CONTAINERS_BY_META=$(docker ps -a --format '{{.ID}} {{.Names}} {{.Image}} {{.Command}}' | grep -iE 'rtmp|cookie|prism|noalbs|stunnel|stream_validator' | awk '{print $1}' || true)
+        CONTAINERS_BY_ANCESTOR=$(docker ps -a -q --filter "ancestor=cookie-rtmps" 2>/dev/null || true)
+        ALL_CONTAINERS=$(printf "%s\n%s\n" "$CONTAINERS_BY_META" "$CONTAINERS_BY_ANCESTOR" | sort -u | tr '\n' ' ' | xargs)
+
+        if [ -n "$ALL_CONTAINERS" ]; then
+            docker stop $ALL_CONTAINERS 2>/dev/null && echo -e "${GREEN}Stopped matching containers.${NC}" || true
+            docker rm -v -f $ALL_CONTAINERS 2>/dev/null && echo -e "${GREEN}Removed matching containers and anonymous volumes.${NC}" || true
+        else
+            docker stop cookie-rtmps 2>/dev/null || true
+            docker rm -v -f cookie-rtmps 2>/dev/null || true
+        fi
+    fi
+
+    # 2. Deep port and process cleanup (strictly skips 80, 443, 22, 53, etc.)
     deep_cleanup_ports_and_processes
 
-    OLD_VOLUMES=$(docker volume ls -q | grep -iE 'rtmp|cookie|prism' || true)
-    if [ ! -z "$OLD_VOLUMES" ]; then
-        docker volume rm -f $OLD_VOLUMES 2>/dev/null && echo -e "${GREEN}Matching Docker volumes removed.${NC}" || true
+    if command -v docker &> /dev/null; then
+        # 3. Deep search for Docker volumes
+        echo -e "${YELLOW}Searching for related Docker volumes...${NC}"
+        OLD_VOLUMES=$(docker volume ls -q | grep -iE 'rtmp|cookie|prism|noalbs|stunnel' || true)
+        if [ -n "$OLD_VOLUMES" ]; then
+            docker volume rm -f $OLD_VOLUMES 2>/dev/null && echo -e "${GREEN}Removed matching Docker volumes.${NC}" || true
+        fi
+
+        # 4. Deep search for custom Docker networks
+        echo -e "${YELLOW}Searching for related Docker networks...${NC}"
+        OLD_NETWORKS=$(docker network ls --format '{{.ID}} {{.Name}}' | grep -iE 'rtmp|cookie|prism|noalbs' | awk '{print $1}' || true)
+        if [ -n "$OLD_NETWORKS" ]; then
+            docker network rm $OLD_NETWORKS 2>/dev/null && echo -e "${GREEN}Removed matching Docker networks.${NC}" || true
+        fi
+
+        # 5. Deep search for Docker images (including dangling/intermediate layers)
+        echo -e "${YELLOW}Searching for related Docker images and build layers...${NC}"
+        OLD_IMAGES=$(docker images -a --format '{{.ID}} {{.Repository}} {{.Tag}}' | grep -iE 'rtmp|cookie|prism|noalbs' | awk '{print $1}' | sort -u || true)
+        if [ -n "$OLD_IMAGES" ]; then
+            docker rmi -f $OLD_IMAGES 2>/dev/null && echo -e "${GREEN}Removed matching Docker images.${NC}" || true
+        else
+            docker rmi -f cookie-rtmps 2>/dev/null || true
+        fi
+
+        # 6. Prune dangling volumes, networks, images, and buildx/builder cache
+        echo -e "${YELLOW}Pruning Docker build caches, dangling layers, and unused resources...${NC}"
+        docker volume prune -f 2>/dev/null || true
+        docker network prune -f 2>/dev/null || true
+        docker image prune -a -f 2>/dev/null || true
+        docker builder prune -a -f 2>/dev/null || true
+        docker buildx prune -a -f 2>/dev/null || true
+        docker system prune -a --volumes -f 2>/dev/null || true
     fi
 
-    OLD_IMAGES=$(docker images --format '{{.ID}} {{.Repository}}' | grep -iE 'rtmp|cookie|prism' | awk '{print $1}')
-    if [ ! -z "$OLD_IMAGES" ]; then
-        docker rmi -f $OLD_IMAGES 2>/dev/null && echo -e "${GREEN}Images removed.${NC}" || true
-    else
-        docker rmi -f cookie-rtmps 2>/dev/null && echo -e "${GREEN}Image removed.${NC}" || true
-    fi
-
-    echo -e "${YELLOW}Pruning Docker build cache, volumes, networks, and unused images...${NC}"
-    docker volume prune -f 2>/dev/null || true
-    docker network prune -f 2>/dev/null || true
-    docker image prune -a -f 2>/dev/null || true
-    docker builder prune -a -f 2>/dev/null || true
-    docker system prune -a -f 2>/dev/null || true
-
-    echo -e "${YELLOW}Removing local configuration files and data cache...${NC}"
-    rm -f rtmp_config.env
+    # 7. Deep search and removal of local files, cached assets, temp files, and sysctl tuning
+    echo -e "${YELLOW}Searching and removing RTMPS configuration files, cached media assets, and temp directories...${NC}"
+    rm -f ./rtmp_config.env
     rm -rf ./data
-    echo -e "${GREEN}Local configuration and data removed.${NC}"
+    rm -f ./*.tmp ./brb_video.mp4 ./episode_count.txt ./get-docker.sh
 
-    echo -e "${GREEN}CookieRTMPS and all cached components have been completely uninstalled and all ports unbound.${NC}"
+    # Clean up any leftover temporary build or runtime assets in /tmp and /var/tmp
+    $SUDO rm -rf /tmp/build /tmp/nginx-client-body 2>/dev/null || true
+    $SUDO find /tmp /var/tmp -maxdepth 2 \( -iname "*cookie-rtmp*" -o -iname "*cookie_rtmp*" -o -iname "*cookie-nginx-rtmp*" -o -iname "*brb_video*" -o -iname "*noalbs*" -o -iname "*tiktok_pusher*" \) -exec rm -rf {} + 2>/dev/null || true
+
+    # Search current directory tree for any stray cached .tmp, .flv, .ts, or .pyc files
+    find . -maxdepth 3 \( -name "*.pyc" -o -name "__pycache__" -o -name "*.tmp" -o -name "brb_video*.mp4" \) -exec rm -rf {} + 2>/dev/null || true
+
+    # Remove custom sysctl stream optimization file if created by installer
+    if [ -f "/etc/sysctl.d/99-stream-optimization.conf" ]; then
+        $SUDO rm -f "/etc/sysctl.d/99-stream-optimization.conf" 2>/dev/null || true
+        $SUDO sysctl --system >/dev/null 2>&1 || true
+        echo -e "${GREEN}Removed /etc/sysctl.d/99-stream-optimization.conf.${NC}"
+    fi
+
+    echo -e "${GREEN}Deep uninstallation complete: all CookieRTMPS containers, images, cached assets, configs, and non-sensitive ports have been cleaned.${NC}"
     sleep 3
 }
 
@@ -1758,7 +1687,7 @@ while true; do
     echo "5) Configure IP Whitelist (Optional)"
     echo "6) Configure Domain / Reverse Proxy (Optional)"
     echo "7) Configure Optimizations (Chunk Size)"
-    echo "8) Disconnection protection settings"
+    echo "8) Configure NOALBS Scene Switcher"
     echo "9) Build & Start Server"
     echo "10) Run Integration Tests"
     echo "11) Stop Server & Uninstall"
@@ -1775,7 +1704,7 @@ while true; do
         5) configure_whitelist ;;
         6) configure_domain ;;
         7) configure_optimizations ;;
-        8) configure_disconnection_protection ;;
+        8) configure_noalbs ;;
         9) build_and_run ;;
         10) if [ -f "./integration_test.sh" ]; then chmod +x ./integration_test.sh; ./integration_test.sh; else echo -e "${RED}Test script not found.${NC}"; fi; echo -e "Press Enter to continue..."; read -r ;;
         11) stop_and_uninstall ;;
