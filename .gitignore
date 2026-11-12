@@ -1,3 +1,4 @@
 rtmp_config.env
 __pycache__/
 *.pyc
+.env
