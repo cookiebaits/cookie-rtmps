@@ -1,102 +1,106 @@
-# CookieRTMPS: Secure, Self-hosted Multistreaming Solution
+# CookieRTMPS (RTMP/RTMPS Multi-Stream Relay)
 
-**PROJECT CONTEXT (Read First!)**
+CookieRTMPS is a Dockerized Nginx-RTMP + Stunnel multi-streaming relay server built for simultaneous horizontal and vertical broadcasting across YouTube, Twitch, Kick, TikTok, Facebook, Instagram, X (Twitter), Trovo, and custom RTMP endpoints.
 
-This project (`cookiebaits/cookie-rtmps`) is a standalone codebase that provides a robust, self-hosted RTMP relay for multistreaming, built heavily on secure practices, stream key validation, and automatic quality-of-life integrations. It guarantees secure access and stability when streaming to multiple platforms simultaneously.
+## Key Features
 
-*   **The Problem with Obscurity:** Historically, some RTMP relays relied on randomizing the RTMP application path or URL as their sole security measure, effectively claiming "Your Stream Key Does Not Matter." While this adds a minor layer of *obscurity*, it **does not fundamentally fix stream hijacking vulnerabilities**. If the random path is ever leaked or discovered, anyone can stream to your server because the key itself is never checked.
-*   **The CookieRTMPS Solution:** CookieRTMPS implements **strict stream key validation** (`on_publish` check). When a stream connects, its key is checked securely via `stream_validator.py` against your configured destination keys. Only streams with a perfect matching key are authorized and relayed. This is the industry-standard approach to securing RTMP ingest points.
-
-## Introduction
-
-Would you like to stream to Twitch, YouTube, Kick, Trovo, Facebook, Instagram, X (Twitter), Cloudflare, and custom RTMP destinations at once, without the upload strain on your computer or recurring fees of commercial services?
-
-You can host **CookieRTMPS** on a server to act as a **secure and efficient** relay for your streamed content!
-
-You stream **one** high-quality feed to your CookieRTMPS server, and it will:
-1.  **Validate** the incoming stream to ensure it's from you, preventing unauthorized access.
-2.  **Relay** your stream to all the platforms you configure.
-
-This project includes performance tuning (optimized `chunk_size`), updated core components for better stability and security, and active maintenance.
-
-### Key Features
-*   **Server IP Auto-Whitelisting:** Configure an IP Whitelist dynamically by auto-fetching your host IP (useful for VPN/Wireguard setups).
-*   **NOALBS Scene Switcher & Cloud BRB Integration:** Automatic bitrate monitoring to dynamically switch OBS scenes and trigger fallback `.mp4` video looping on stream disconnects—enabled by default for maximum stream stability.
-*   **Vertical Streaming Support:** Optimized for use with the **OBS Aitum Vertical plugin**. Push a second, independent vertical feed to specialized targets (TikTok, YouTube Vertical, Twitch Vertical) alongside your horizontal stream.
-*   **Automated Stream Titles:** Automatically set and update your stream titles in the format: `Base Title / Episode # / Date`. Episode numbers are persisted and increment automatically! (Current support: Twitch API).
-*   **Aggressive Cleanup & Testing:** Built-in scripts to aggressively purge old Docker instances to avoid port conflicts and ensure smooth upgrades, backed by instant integration testing.
-*   **Cloudflare Reverse Proxy:** Built-in support for Cloudflare Real IP, allowing you to secure your stats page behind a Cloudflare proxy.
-*   **Nginx 1.30.3 & Custom RTMP:** Updated to the latest stable Nginx with a custom, hardened RTMP module (including strict memory limits and recursion bounds) for maximum reliability.
-
-## Prequisites
-
-You'd need a VPS server. Key considerations:
-*   **Network Performance:** Good bandwidth, low latency, and stable routing between your VPS and your chosen streaming platforms are crucial, especially for 1080p 60fps.
-*   **Resources:** A 2 vCore, 2GB RAM VPS (like those from Ionos, Linode, Digital Ocean, Vultr, Hetzner Cloud) is often sufficient. This project has been tested and runs effectively on such configurations. Choose a location strategically.
-
-## How To Set up CookieRTMPS
-
-*   1- **SSH into your VPS server:**
-    ```bash
-    ssh root@<your_server_ip_address>
-    ```
-
-*   2- **Clone, Set permissions, & Run the Repository:**
-    ```bash
-    git clone https://github.com/cookiebaits/cookie-rtmps.git && cd cookie-rtmps && chmod +x install.sh && ./install.sh
-    ```
-    *   Use the menu to easily install Docker (if needed).
-    *   Configure your stream keys and set any desired optimizations (like NGINX `chunk_size`).
-    *   Select "Build & Start Server" to launch your customized RTMP relay.
-
-*   3- **TikTok Auto-Pusher Configuration (Optional):**
-    *   If you want to stream to TikTok without installing their official desktop software due to privacy concerns, CookieRTMPS has a built-in Streamlabs Auto-Pusher.
-    *   In the `install.sh` menu, under Horizontal or Vertical stream keys, select **TikTok**, then choose option **3) Streamlabs Auto-Pusher (Bypass TikTok Studio)**.
-    *   You will be prompted to enter your Streamlabs API Token, a Stream Title, and an optional Game ID.
-    *   CookieRTMPS will automatically spin up a secure, invisible relay pushing your feed directly to TikTok via Streamlabs the moment your stream goes live!
-
-*   4- **Configure OBS (or other streaming software):**
-    *   Service: `Custom...`
-    *   **Horizontal Server:** `rtmp://<your_vps_ip_address>:1935/live`
-    *   **Vertical Server:** `rtmp://<your_vps_ip_address>:1935/vertical` (For Aitum Vertical)
-    *   Stream Key: **Use ONE of the actual stream keys you configured during the setup process** (or the custom Master OBS Key if you set one).
-
-*   5- **Begin streaming from OBS!**
-
-We advise testing with one or two destinations first.
-
-## How To Manage CookieRTMPS
-
-*   **STOP** the container: `docker stop cookie-rtmps`
-*   **START** the container: `docker start cookie-rtmps`
-*   **VIEW LOGS:** `docker logs cookie-rtmps` (or `docker logs -f cookie-rtmps` for live logs)
-*   **EDIT Destinations / Keys:** Stop, remove (`docker rm cookie-rtmps`), and re-run the `docker run` command.
-*   **UNINSTALL:** Stop, remove container, then `docker rmi cookie-rtmps`.
-
-## Troubleshooting Common Issues
-
-*   **Lag / Falling Behind Stream:** Often a network bottleneck. This fork uses `chunk_size: 8192` for improved performance.
-    *   **Diagnosis:** Test one destination at a time. Use `mtr <destination_hostname>` from VPS.
-    *   **Solutions:** Different ingest servers, different VPS location, or lower stream bitrate.
-*   **Stream Rejects / "Invalid Key":**
-    *   OBS key *must exactly match* one key from `docker run`.
-    *   Ensure at least one destination key is active in `docker run`.
-    *   Check validator logs: `docker exec cookie-rtmps tail /tmp/validator.log` or `docker logs cookie-rtmps`.
-*   **One Destination Not Working:** Check URL/Key in `docker run`. Check Nginx/Stunnel logs. Ensure stream is active on the platform.
-
-## Support & Contributing
-
-Need help or have suggestions for **CookieRTMPS**? Your contributions and feedback are welcome!
-
-*   Raise an Issue: [https://github.com/cookiebaits/cookie-rtmps/issues](https://github.com/cookiebaits/cookie-rtmps/issues)
-*   Join our Discord: [http://wubu.cookiebaits.com](http://wubu.cookiebaits.com) (Shield above also links here)
+- **Horizontal & Vertical Multi-Streaming:** Route horizontal (`rtmp://<host>:1935/live`) and vertical (`rtmp://<host>:1935/vertical`) OBS feeds simultaneously with automatic ingest server diversification for YouTube, Twitch, and Kick.
+- **Native RTMP & Stunnel RTMPS Support:** Direct RTMP support for YouTube (`a.rtmp.youtube.com`) and Twitch (`ingest.global-contribute.live-video.net`), alongside encrypted RTMPS relays via Stunnel for Facebook (`19350`), Instagram (`19351`), Twitch (`19353`), X (`19354`), YouTube Primary/Backup (`19355`/`19357`), Kick (`19356`), and TikTok (`19358`).
+- **Pure RTMP Footprint (No Web/HTML Pages):** All HTML pages (`chat.html`, `/stat`, `stat.xsl`), Combined Chat, and Stream Title/Twitch API web hooks are stripped out, exposing only the RTMP ingest port (`1935`) without binding or interfering with host web ports (`80`, `443`, etc.).
+- **NOALBS Disabled by Default:** Disconnection protection and BRB MP4 download/FFmpeg transcoding are disabled out of the box (`NOALBS_ENABLED="false"`, `CLOUD_BRB="false"`) and can be enabled on demand from the installer menu.
+- **Automatic Persistent Configuration & Fast Redeploy:** Settings saved in `rtmp_config.env` are automatically mirrored to `~/.cookie-rtmps/rtmp_config.env` so replacing `install.sh` or re-cloning the repository preserves every stream key and menu setting.
+- **Pre-Start Cleanup & Deep Uninstall:** Automatically clears old RTMP containers, volumes, stale temp/cache files, and non-sensitive RTMP port conflicts before starting, and provides a deep uninstall option that wipes all RTMP/RTMPS artifacts without touching sensitive system ports (`22`, `53`, `80`, `443`, etc.).
 
 ---
-**Historical Note:**
 
-CookieRTMPS was originally born as a fork to address a critical security vulnerability in an older RTMP relay project that lacked proper stream key validation (allowing unauthorized individuals to hijack streams if they found the server IP/port). CookieRTMPS has since evolved into a standalone, feature-rich multistreaming platform that prioritizes strict security, stability, and ease-of-use for the community.
+## Fresh Installation
+
+```bash
+git clone https://github.com/cookiebaits/cookie-rtmps.git && cd cookie-rtmps && chmod +x install.sh && ./install.sh
+```
+
+1. Select **1) Install Docker** if Docker is not yet installed on your host.
+2. Configure your stream keys under **2) Configure Stream Keys (Horizontal)** and/or **3) Configure Stream Keys (Vertical)**.
+3. Optionally configure your OBS security key, custom app path, IP whitelist, domain, or chunk size.
+4. Select **9) Build & Start Server**.
 
 ---
-**Legal, Disclaimer and Licensing:**
 
-CookieRTMPS is not for public use. This is not a open source licensing, this is a program with no warranty, no support and we are not responsible for any data leaks, security breaches, etc. This program was strictly and only made for Cookiebaits and the Ruinscam brands. This is not recommend and completely restricted from commercial use without explicit permission. 
+## Updating & Quick Redeployment (Preserving All Settings)
+
+Whenever you configure any option in `install.sh`, your configuration is saved to `./rtmp_config.env` **and** automatically backed up outside the repository folder at:
+
+```text
+~/.cookie-rtmps/rtmp_config.env
+```
+
+Because the backup lives outside the `cookie-rtmps` directory, you can cleanly replace the entire repository or drop in an updated `install.sh` and `Dockerfile` without losing any stream keys, OBS keys, IP whitelists, or menu settings.
+
+### Option A: Clean Replace & Launch Interactive Menu
+
+Run this one-liner from the parent directory where `cookie-rtmps` is located:
+
+```bash
+rm -rf cookie-rtmps && git clone https://github.com/cookiebaits/cookie-rtmps.git && cd cookie-rtmps && chmod +x install.sh && ./install.sh
+```
+
+When `./install.sh` launches, it automatically detects `~/.cookie-rtmps/rtmp_config.env`, restores `./rtmp_config.env`, and loads all your previous settings.
+
+### Option B: Clean Replace with Custom `install.sh` / `Dockerfile` & Instant Redeploy
+
+If you maintain customized versions of `install.sh` and `Dockerfile` (for example, saved in `~/.cookie-rtmps/custom/`), you can replace the repository, apply your custom files, and rebuild immediately in a single command without stepping through any menus:
+
+```bash
+mkdir -p ~/.cookie-rtmps/custom && \
+cp -f cookie-rtmps/install.sh cookie-rtmps/Dockerfile ~/.cookie-rtmps/custom/ 2>/dev/null || true && \
+rm -rf cookie-rtmps && \
+git clone https://github.com/cookiebaits/cookie-rtmps.git && \
+cp -f ~/.cookie-rtmps/custom/install.sh ~/.cookie-rtmps/custom/Dockerfile cookie-rtmps/ && \
+cd cookie-rtmps && \
+chmod +x install.sh && \
+./install.sh --redeploy
+```
+
+### Option C: Updating Inside an Existing Repository Directory
+
+If you only replaced `install.sh` (or pulled updates inside `cookie-rtmps`), simply run:
+
+```bash
+chmod +x install.sh && ./install.sh --redeploy
+```
+
+---
+
+## Installer Menu Reference
+
+| Option | Description |
+| :--- | :--- |
+| **1) Install Docker** | Installs Docker Engine and enables the systemd service if missing. |
+| **2) Configure Stream Keys (Horizontal)** | Configure horizontal ingest URLs and stream keys for YouTube, Twitch, Kick, TikTok, Facebook, Instagram, X, Trovo, or Custom RTMP. |
+| **3) Configure Stream Keys (Vertical)** | Configure vertical stream keys or mirror horizontal keys with automatic ingest server diversification. |
+| **4) Configure OBS Setup & Security Key** | View RTMP ingest URLs, set a custom OBS stream key, or change the RTMP application path. |
+| **5) Configure IP Whitelist (Optional)** | Restrict incoming OBS connections to your server/VPN IP or a specific client IP. |
+| **6) Configure Domain / Reverse Proxy (Optional)** | Set a custom hostname for displaying RTMP ingest URLs. |
+| **7) Configure Optimizations (Chunk Size)** | Adjust RTMP chunk size (default `8192`) and apply Google BBR + TCP socket buffer tuning. |
+| **8) Configure NOALBS Scene Switcher** | Enable/configure optional low-bitrate OBS scene switching or BRB video fallback (disabled by default). |
+| **9) Build & Start Server** | Cleans old RTMP containers/temp files, verifies port `1935`, builds the Docker image, and starts `cookie-rtmps`. |
+| **10) Run Integration Tests** | Runs `./integration_test.sh` against the active container. |
+| **11) Stop Server & Uninstall** | Deep-searches and removes all RTMP/RTMPS containers, images, volumes, networks, cache/temp files, persistent backups, and non-sensitive RTMP ports (never touching ports `80`, `443`, `22`, `53`, etc.). |
+| **12) View Logs** | Streams color-coded container logs with an option to truncate log files. |
+| **13) Quit** | Exits the installer. |
+
+---
+
+## Ports Used
+
+- **External Host Port:** `1935/tcp` (RTMP Horizontal & Vertical Ingest)
+- **Internal Container Loopback Stunnel Ports (`127.0.0.1` only):**
+  - `19350`: Facebook RTMPS
+  - `19351`: Instagram RTMPS
+  - `19353`: Twitch RTMPS
+  - `19354`: X (Twitter) RTMPS
+  - `19355`: YouTube Primary RTMPS
+  - `19356`: Kick RTMPS
+  - `19357`: YouTube Backup RTMPS
+  - `19358`: TikTok RTMPS
+- **Protected Ports (Never Modified or Bound):** `20`, `21`, `22`, `25`, `53`, `67`, `68`, `80`, `110`, `123`, `143`, `443`, `465`, `587`, `993`, `995`, `3306`, `5432`, `6379`, `27017`.
