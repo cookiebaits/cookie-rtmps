@@ -2,6 +2,10 @@
 # install.sh - Menu style configuration and installation for CookieRTMPS
 # Ensure script is run with bash
 
+# Resolve script directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR" || exit 1
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -20,7 +24,7 @@ TIKTOK_KEY=""
 TIKTOK_SL_TOKEN=""
 TIKTOK_TITLE=""
 TIKTOK_GAME_ID=""
-TWITCH_URL="rtmp://127.0.0.1:19353/app/"
+TWITCH_URL="rtmp://ingest.global-contribute.live-video.net/app/"
 TWITCH_KEY=""
 KICK_URL="rtmp://127.0.0.1:19356/kick/"
 KICK_KEY=""
@@ -34,7 +38,7 @@ RTMP1_KEY=""
 # Vertical Defaults
 V_YOUTUBE_URL="rtmp://a.rtmp.youtube.com/live2/"
 V_YOUTUBE_KEY=""
-V_TWITCH_URL="rtmp://127.0.0.1:19353/app/"
+V_TWITCH_URL="rtmp://ingest.global-contribute.live-video.net/app/"
 V_TWITCH_KEY=""
 V_KICK_URL="rtmp://127.0.0.1:19356/kick/"
 V_KICK_KEY=""
@@ -56,24 +60,12 @@ APP_NAME="live"
 ACCEPTED_IP=""
 SERVER_DOMAIN=""
 CHUNK_SIZE="8192"
-STREAM_BASE_TITLE="Live Stream"
-TWITCH_CLIENT_ID=""
-TWITCH_OAUTH_TOKEN=""
-TWITCH_BROADCASTER_ID=""
-
-# Combined Chat Settings
-CHAT_TWITCH=""
-CHAT_YOUTUBE=""
-CHAT_KICK=""
-CHAT_TIKTOK=""
 
 # Host Port Settings
 PORT_RTMP="1935"
-PORT_HTTP="8443"
-PORT_STATS="8081"
 
-# NOALBS Settings
-NOALBS_ENABLED="true"
+# NOALBS Settings (Disabled by default)
+NOALBS_ENABLED="false"
 FALLBACK_MODE="video"
 OBS_WS_HOST="127.0.0.1"
 OBS_WS_PORT="4455"
@@ -82,19 +74,22 @@ OBS_SCENE_LIVE="Main"
 OBS_SCENE_BRB="BRB"
 LOW_BITRATE="1000"
 RESTORE_BITRATE="1500"
-CLOUD_BRB="true"
+CLOUD_BRB="false"
 BRB_VIDEO_URL=""
 CLOUD_BRB_TIMEOUT="300"
 
-CONFIG_FILE="rtmp_config.env"
+CONFIG_FILE="$SCRIPT_DIR/rtmp_config.env"
+PERSIST_USER_DIR="$HOME/.cookie-rtmps"
+PERSIST_USER_CONFIG="$PERSIST_USER_DIR/rtmp_config.env"
+PERSIST_SYS_DIR="/etc/cookie-rtmps"
+PERSIST_SYS_CONFIG="$PERSIST_SYS_DIR/rtmp_config.env"
 
-# Load saved configuration if it exists
-if [ -f "$CONFIG_FILE" ]; then
-    source "$CONFIG_FILE"
-fi
-
-save_config() {
-    cat <<ENV_EOF > "$CONFIG_FILE"
+write_config_to_path() {
+    local target_file="$1"
+    local target_dir
+    target_dir="$(dirname "$target_file")"
+    mkdir -p "$target_dir" 2>/dev/null || true
+    cat <<ENV_EOF > "$target_file" 2>/dev/null
 YOUTUBE_URL="$YOUTUBE_URL"
 YOUTUBE_KEY="$YOUTUBE_KEY"
 FACEBOOK_URL="$FACEBOOK_URL"
@@ -137,16 +132,8 @@ V_RTMP1_KEY="$V_RTMP1_KEY"
 OBS_KEY="$OBS_KEY"
 APP_NAME="$APP_NAME"
 ACCEPTED_IP="$ACCEPTED_IP"
-CHAT_TWITCH="$CHAT_TWITCH"
-CHAT_YOUTUBE="$CHAT_YOUTUBE"
-CHAT_KICK="$CHAT_KICK"
-CHAT_TIKTOK="$CHAT_TIKTOK"
 SERVER_DOMAIN="$SERVER_DOMAIN"
 CHUNK_SIZE="$CHUNK_SIZE"
-STREAM_BASE_TITLE="$STREAM_BASE_TITLE"
-TWITCH_CLIENT_ID="$TWITCH_CLIENT_ID"
-TWITCH_OAUTH_TOKEN="$TWITCH_OAUTH_TOKEN"
-TWITCH_BROADCASTER_ID="$TWITCH_BROADCASTER_ID"
 NOALBS_ENABLED="$NOALBS_ENABLED"
 FALLBACK_MODE="$FALLBACK_MODE"
 OBS_WS_HOST="$OBS_WS_HOST"
@@ -160,9 +147,114 @@ CLOUD_BRB="$CLOUD_BRB"
 BRB_VIDEO_URL="$BRB_VIDEO_URL"
 CLOUD_BRB_TIMEOUT="$CLOUD_BRB_TIMEOUT"
 PORT_RTMP="$PORT_RTMP"
-PORT_HTTP="$PORT_HTTP"
-PORT_STATS="$PORT_STATS"
 ENV_EOF
+}
+
+sync_and_preserve_installation() {
+    local found_config=""
+    local newest_mtime=0
+
+    # Search local, persistent, parent, and standard installation paths for existing settings
+    local candidate_configs=(
+        "$CONFIG_FILE"
+        "$PERSIST_USER_CONFIG"
+        "$PERSIST_SYS_CONFIG"
+        "$(dirname "$SCRIPT_DIR")/rtmp_config.env"
+        "$HOME/cookie-rtmps/rtmp_config.env"
+        "/root/cookie-rtmps/rtmp_config.env"
+        "/opt/cookie-rtmps/rtmp_config.env"
+        "/srv/cookie-rtmps/rtmp_config.env"
+    )
+
+    for home_cfg in /home/*/cookie-rtmps/rtmp_config.env; do
+        if [ -f "$home_cfg" ]; then
+            candidate_configs+=("$home_cfg")
+        fi
+    done
+
+    for cfg in "${candidate_configs[@]}"; do
+        if [ -f "$cfg" ] && [ -s "$cfg" ]; then
+            local mtime
+            mtime=$(stat -c %Y "$cfg" 2>/dev/null || stat -f %m "$cfg" 2>/dev/null || echo "1")
+            if [ "$mtime" -ge "$newest_mtime" ]; then
+                newest_mtime="$mtime"
+                found_config="$cfg"
+            fi
+        fi
+    done
+
+    # Import and load existing configuration if found
+    if [ -n "$found_config" ]; then
+        if [ "$found_config" != "$CONFIG_FILE" ]; then
+            cp -f "$found_config" "$CONFIG_FILE" 2>/dev/null || true
+        fi
+        # Load only valid non-HTML/non-deprecated keys
+        source "$CONFIG_FILE"
+        unset CHAT_TWITCH CHAT_YOUTUBE CHAT_KICK CHAT_TIKTOK STREAM_BASE_TITLE TWITCH_CLIENT_ID TWITCH_OAUTH_TOKEN TWITCH_BROADCASTER_ID PORT_HTTP PORT_STATS
+    fi
+
+    # Replace existing install.sh and updated repo files in any previous installation directory while keeping settings
+    local old_install_dirs=(
+        "$(dirname "$SCRIPT_DIR")"
+        "$HOME/cookie-rtmps"
+        "/root/cookie-rtmps"
+        "/opt/cookie-rtmps"
+        "/srv/cookie-rtmps"
+    )
+
+    for old_dir in "${old_install_dirs[@]}"; do
+        if [ -d "$old_dir" ] && [ "$old_dir" != "$SCRIPT_DIR" ] && [ -f "$old_dir/install.sh" ]; then
+            cp -f "$SCRIPT_DIR/install.sh" "$old_dir/install.sh" 2>/dev/null || true
+            chmod +x "$old_dir/install.sh" 2>/dev/null || true
+            for repo_item in Dockerfile docker-entrypoint.sh integration_test.sh stream_validator.py tiktok_pusher.py test_noalbs.py; do
+                if [ -f "$SCRIPT_DIR/$repo_item" ]; then
+                    cp -f "$SCRIPT_DIR/$repo_item" "$old_dir/$repo_item" 2>/dev/null || true
+                fi
+            done
+            if [ -d "$SCRIPT_DIR/nginx" ]; then
+                rm -rf "$old_dir/nginx" 2>/dev/null || true
+                cp -rf "$SCRIPT_DIR/nginx" "$old_dir/nginx" 2>/dev/null || true
+            fi
+            if [ -d "$SCRIPT_DIR/stunnel" ]; then
+                rm -rf "$old_dir/stunnel" 2>/dev/null || true
+                cp -rf "$SCRIPT_DIR/stunnel" "$old_dir/stunnel" 2>/dev/null || true
+            fi
+            if [ -d "$SCRIPT_DIR/cookie-nginx-rtmp" ]; then
+                rm -rf "$old_dir/cookie-nginx-rtmp" 2>/dev/null || true
+                cp -rf "$SCRIPT_DIR/cookie-nginx-rtmp" "$old_dir/cookie-nginx-rtmp" 2>/dev/null || true
+            fi
+            # Remove any deprecated HTML/title scripts from previous installs
+            rm -f "$old_dir/chat.html" "$old_dir/update_titles.py" 2>/dev/null || true
+            if [ -f "$CONFIG_FILE" ]; then
+                cp -f "$CONFIG_FILE" "$old_dir/rtmp_config.env" 2>/dev/null || true
+            fi
+        fi
+    done
+
+    # Persist current settings to local and backup locations so future redeploys retain all menu configurations
+    if [ -n "$found_config" ] || [ -f "$CONFIG_FILE" ]; then
+        write_config_to_path "$CONFIG_FILE"
+        write_config_to_path "$PERSIST_USER_CONFIG"
+        if [ "$EUID" -eq 0 ]; then
+            write_config_to_path "$PERSIST_SYS_CONFIG"
+        elif command -v sudo &> /dev/null; then
+            sudo mkdir -p "$PERSIST_SYS_DIR" 2>/dev/null || true
+            sudo cp -f "$CONFIG_FILE" "$PERSIST_SYS_CONFIG" 2>/dev/null || true
+        fi
+    fi
+}
+
+sync_and_preserve_installation
+
+save_config() {
+    write_config_to_path "$CONFIG_FILE"
+    write_config_to_path "$PERSIST_USER_CONFIG"
+    if [ "$EUID" -eq 0 ]; then
+        write_config_to_path "$PERSIST_SYS_CONFIG"
+    elif command -v sudo &> /dev/null; then
+        sudo mkdir -p "$PERSIST_SYS_DIR" 2>/dev/null || true
+        sudo cp -f "$CONFIG_FILE" "$PERSIST_SYS_CONFIG" 2>/dev/null || true
+    fi
     echo -e "${GREEN}Configuration saved to $CONFIG_FILE${NC}"
 }
 
@@ -750,11 +842,6 @@ configure_obs() {
     echo -e "  ${YELLOW}Horizontal URL:${NC} rtmp://${DISPLAY_HOST}:${PORT_RTMP}/${APP_NAME}"
     echo -e "  ${YELLOW}Vertical URL:${NC}   rtmp://${DISPLAY_HOST}:${PORT_RTMP}/vertical"
     echo ""
-    echo -e "--- Combined Chat ---"
-    echo -e "You can use the combined chat as a browser source in OBS:"
-    echo -e "  ${YELLOW}URL:${NC} http://${DISPLAY_HOST}/chat.html?twitch=YOUR_CHANNEL&youtube=YOUR_VIDEO_ID"
-    echo -e "  (Replace YOUR_CHANNEL and YOUR_VIDEO_ID as needed)"
-    echo ""
     echo -e "--- Security Key ---"
     echo -e "CookieRTMPS requires a matching stream key to accept your stream."
     echo -e "Current Custom OBS Key: ${OBS_KEY:-None}"
@@ -862,115 +949,6 @@ configure_whitelist() {
                 echo -e "${RED}Invalid option${NC}"
                 sleep 1
                 ;;
-        esac
-    done
-}
-
-configure_titles() {
-    while true; do
-        clear
-        echo -e "${GREEN}=== Stream Titles & Twitch API Configuration ===${NC}"
-        echo "1) Base Title (Current: $STREAM_BASE_TITLE)"
-        echo "2) Twitch Client ID (Current: ${TWITCH_CLIENT_ID:-None})"
-        echo "3) Twitch OAuth Token (Current: ${TWITCH_OAUTH_TOKEN:-None})"
-        echo "4) Twitch Broadcaster ID (Current: ${TWITCH_BROADCASTER_ID:-None})"
-        echo "5) Reset Episode Count"
-        echo "6) Back to Main Menu"
-        echo -e "Select an option: \c"
-        read -r title_opt
-
-        case $title_opt in
-            1)
-                echo -e "Enter Base Stream Title:"
-                read -r title_input
-                STREAM_BASE_TITLE="$title_input"
-                save_config
-                ;;
-            2)
-                echo -e "Enter Twitch Client ID:"
-                read -r title_input
-                TWITCH_CLIENT_ID="$title_input"
-                save_config
-                ;;
-            3)
-                echo -e "Enter Twitch OAuth Token (Bearer):"
-                read -r title_input
-                TWITCH_OAUTH_TOKEN="$title_input"
-                save_config
-                ;;
-            4)
-                echo -e "Enter Twitch Broadcaster ID (Numeric):"
-                read -r title_input
-                TWITCH_BROADCASTER_ID="$title_input"
-                save_config
-                ;;
-            5)
-                mkdir -p ./data
-                echo "1" > ./data/episode_count.txt
-                echo -e "${GREEN}Episode count reset to 1.${NC}"
-                sleep 1
-                ;;
-            6) break ;;
-            *) echo -e "${RED}Invalid option${NC}" ; sleep 1 ;;
-        esac
-    done
-}
-
-configure_chat() {
-    while true; do
-        clear
-        echo -e "${GREEN}=== Combined Chat Configuration ===${NC}"
-        echo "Enter Channel Names/IDs for browser source embeds:"
-        echo ""
-        echo "1) Twitch Channel (Current: ${CHAT_TWITCH:-None})"
-        echo "2) YouTube Video ID (Current: ${CHAT_YOUTUBE:-None})"
-        echo "3) Kick Channel (Current: ${CHAT_KICK:-None})"
-        echo "4) TikTok Channel (Current: ${CHAT_TIKTOK:-None})"
-        echo "5) Show Browser Source URL"
-        echo "6) Back to Main Menu"
-        echo -e "Select an option: \c"
-        read -r chat_opt
-
-        case $chat_opt in
-            1)
-                echo -e "Enter Twitch Channel Name:"
-                read -r chat_input
-                CHAT_TWITCH="$chat_input"
-                save_config
-                ;;
-            2)
-                echo -e "Enter YouTube Video ID (from URL v=XXXX):"
-                read -r chat_input
-                CHAT_YOUTUBE="$chat_input"
-                save_config
-                ;;
-            3)
-                echo -e "Enter Kick Channel Name:"
-                read -r chat_input
-                CHAT_KICK="$chat_input"
-                save_config
-                ;;
-            4)
-                echo -e "Enter TikTok Username (without @):"
-                read -r chat_input
-                CHAT_TIKTOK="$chat_input"
-                save_config
-                ;;
-            5)
-                SERVER_IP=$(curl -4 -s ifconfig.me || echo "<your_server_ip>")
-                DISPLAY_HOST=${SERVER_DOMAIN:-$SERVER_IP}
-                CHAT_URL="http://${DISPLAY_HOST}/chat.html?"
-                if [ ! -z "$CHAT_TWITCH" ]; then CHAT_URL="${CHAT_URL}twitch=${CHAT_TWITCH}&"; fi
-                if [ ! -z "$CHAT_YOUTUBE" ]; then CHAT_URL="${CHAT_URL}youtube=${CHAT_YOUTUBE}&"; fi
-                if [ ! -z "$CHAT_KICK" ]; then CHAT_URL="${CHAT_URL}kick=${CHAT_KICK}&"; fi
-                if [ ! -z "$CHAT_TIKTOK" ]; then CHAT_URL="${CHAT_URL}tiktok=${CHAT_TIKTOK}&"; fi
-                echo -e "\n${YELLOW}OBS Browser Source URL:${NC}"
-                echo -e "${GREEN}${CHAT_URL%&}${NC}"
-                echo -e "\nPress Enter to continue..."
-                read -r
-                ;;
-            6) break ;;
-            *) echo -e "${RED}Invalid option${NC}" ; sleep 1 ;;
         esac
     done
 }
@@ -1121,13 +1099,15 @@ configure_noalbs() {
                 if [ "$input" == "disable" ] || [ "$input" == "clear" ] || [ "$input" == "DISABLE" ] || [ "$input" == "CLEAR" ]; then
                     BRB_VIDEO_URL=""
                     save_config
-                    rm -f ./data/brb_video.mp4
+                    rm -f ./data/brb_video.mp4 ./data/brb_video.mp4.tmp
                     echo -e "${GREEN}Cleared BRB Video URL and removed cached video.${NC}"
                     sleep 1
                 elif [ ! -z "$input" ]; then
                     BRB_VIDEO_URL="$input"
                     save_config
-                    ensure_brb_video_transcoded "$BRB_VIDEO_URL"
+                    if [ "$NOALBS_ENABLED" == "true" ] && [ "$CLOUD_BRB" == "true" ]; then
+                        ensure_brb_video_transcoded "$BRB_VIDEO_URL"
+                    fi
                     sleep 2
                 fi
                 ;;
@@ -1201,7 +1181,7 @@ install_docker() {
         sudo sh get-docker.sh
         sudo systemctl start docker
         sudo systemctl enable docker
-        rm get-docker.sh
+        rm -f get-docker.sh
         echo -e "${GREEN}Docker installed successfully.${NC}"
     else
         echo -e "${GREEN}Docker is already installed.${NC}"
@@ -1209,15 +1189,72 @@ install_docker() {
     sleep 2
 }
 
+is_sensitive_port() {
+    local port=$1
+    case "$port" in
+        20|21|22|25|53|67|68|80|110|123|143|443|465|587|993|995|3306|5432|6379|27017)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 check_port() {
     local port=$1
     if command -v ss &> /dev/null; then
-        ss -tuln | grep -q ":$port "
+        ss -tuln | grep -qE ":${port}(\s|$)"
     elif command -v netstat &> /dev/null; then
-        netstat -tuln | grep -q ":$port "
+        netstat -tuln | grep -qE ":${port}(\s|$)"
     else
         return 1 # Cannot check
     fi
+}
+
+cleanup_old_rtmp_files() {
+    local full_wipe=${1:-false}
+    if [ "$EUID" -ne 0 ] && command -v sudo &> /dev/null; then
+        SUDO="sudo"
+    else
+        SUDO=""
+    fi
+
+    echo -e "${YELLOW}Cleaning up old RTMP temporary, HTML/stats, and cache files...${NC}"
+    rm -f ./get-docker.sh ./*.tmp ./*.log ./episode_count.txt 2>/dev/null || true
+
+    if [ "$full_wipe" == "true" ]; then
+        rm -f "$CONFIG_FILE" 2>/dev/null || true
+        rm -rf ./data ./logs "$PERSIST_USER_DIR" 2>/dev/null || true
+        $SUDO rm -rf "$PERSIST_SYS_DIR" 2>/dev/null || true
+    else
+        if [ -d "./data" ]; then
+            rm -f ./data/*.tmp ./data/*.log ./data/*.pid ./data/*.sock ./data/*.flv ./data/*.ts ./data/*.m3u8 ./data/*.html ./data/*.xsl ./data/episode_count.txt 2>/dev/null || true
+            if [ "$NOALBS_ENABLED" != "true" ] || [ "$CLOUD_BRB" != "true" ]; then
+                rm -f ./data/brb_video.mp4 ./data/brb_video.mp4.tmp 2>/dev/null || true
+            fi
+        fi
+    fi
+
+    # Deep remove temp, cache, and runtime HTML/stats artifacts across system temp/cache directories
+    for base_dir in /tmp /var/tmp /var/run /var/cache /dev/shm; do
+        if [ -d "$base_dir" ]; then
+            $SUDO find "$base_dir" -maxdepth 3 \( \
+                -iname "*rtmp*" -o \
+                -iname "*rtmps*" -o \
+                -iname "*cookie-rtmp*" -o \
+                -iname "*cookiertmp*" -o \
+                -iname "*brb_video*" -o \
+                -iname "*noalbs*" -o \
+                -iname "*stream_validator*" -o \
+                -iname "*tiktok_pusher*" -o \
+                -iname "*update_titles*" -o \
+                -iname "*chat.html*" -o \
+                -iname "*stat.xsl*" -o \
+                -iname "*nginx-client-body*" \
+            \) -exec rm -rf {} + 2>/dev/null || true
+        fi
+    done
 }
 
 build_and_run() {
@@ -1227,28 +1264,32 @@ build_and_run() {
         return
     fi
 
-    echo -e "${YELLOW}Stopping and removing any old container instances and associated Docker volumes...${NC}"
-    OLD_CONTAINERS=$(docker ps -a --format '{{.ID}} {{.Names}}' | grep -iE 'rtmp|cookie|prism' | awk '{print $1}')
+    echo -e "${YELLOW}Checking and removing old containers, port conflicts, and stale files...${NC}"
+    OLD_CONTAINERS=$(docker ps -a --format '{{.ID}} {{.Names}} {{.Image}}' | grep -iE 'rtmp|rtmps|cookie|prism|nginx-rtmp' | awk '{print $1}' | sort -u)
     if [ ! -z "$OLD_CONTAINERS" ]; then
         docker stop $OLD_CONTAINERS 2>/dev/null || true
         docker rm -v -f $OLD_CONTAINERS 2>/dev/null || true
     fi
-    OLD_VOLUMES=$(docker volume ls -q | grep -iE 'rtmp|cookie|prism' || true)
+    OLD_VOLUMES=$(docker volume ls -q | grep -iE 'rtmp|rtmps|cookie|prism' || true)
     if [ ! -z "$OLD_VOLUMES" ]; then
         docker volume rm -f $OLD_VOLUMES 2>/dev/null || true
     fi
+    docker image prune -f 2>/dev/null || true
+
+    # Clear non-sensitive RTMP and unused web/stats port conflicts and stale files before building
     deep_cleanup_ports_and_processes
+    cleanup_old_rtmp_files "false"
 
     enable_bbr_and_tcp_optimizations
 
-    echo -e "${YELLOW}Checking for port conflicts...${NC}"
+    echo -e "${YELLOW}Verifying target RTMP port is clear (excluding sensitive ports 80, 443, etc.)...${NC}"
     CONFLICTS=0
     declare -a PORTS_TO_CHECK=("$PORT_RTMP")
-    if [ ! -z "$SERVER_DOMAIN" ]; then
-        PORTS_TO_CHECK+=("$PORT_HTTP")
-    fi
 
     for port in "${PORTS_TO_CHECK[@]}"; do
+        if is_sensitive_port "$port"; then
+            continue
+        fi
         if check_port "$port"; then
             echo -e "${RED}Warning: Port $port appears to be in use on the host!${NC}"
             echo -e "${YELLOW}If this is another service, CookieRTMPS may fail to start.${NC}"
@@ -1320,15 +1361,19 @@ build_and_run() {
     fi
 
     mkdir -p ./data
-    if [ -f "./data/brb_video.mp4" ] && [ -s "./data/brb_video.mp4" ]; then
-        echo -e "${GREEN}Existing BRB video found at ./data/brb_video.mp4. Preserving video source.${NC}"
-    else
-        if [ -z "$BRB_VIDEO_URL" ]; then
-            echo -e "${YELLOW}BRB Video URL is empty and no cached video exists. Setting to default...${NC}"
-            BRB_VIDEO_URL="https://filedn.com/lfh40bKbFfD5um9HDFNrJFR/brb.mp4"
-            save_config
+    if [ "$NOALBS_ENABLED" == "true" ] && [ "$CLOUD_BRB" == "true" ]; then
+        if [ -f "./data/brb_video.mp4" ] && [ -s "./data/brb_video.mp4" ]; then
+            echo -e "${GREEN}Existing BRB video found at ./data/brb_video.mp4. Preserving video source.${NC}"
+        else
+            if [ -z "$BRB_VIDEO_URL" ]; then
+                echo -e "${YELLOW}BRB Video URL is empty and no cached video exists. Setting to default...${NC}"
+                BRB_VIDEO_URL="https://filedn.com/lfh40bKbFfD5um9HDFNrJFR/brb.mp4"
+                save_config
+            fi
+            ensure_brb_video_transcoded "$BRB_VIDEO_URL"
         fi
-        ensure_brb_video_transcoded "$BRB_VIDEO_URL"
+    else
+        rm -f ./data/brb_video.mp4 ./data/brb_video.mp4.tmp 2>/dev/null || true
     fi
 
     echo -e "${GREEN}Building Docker Image...${NC}"
@@ -1336,15 +1381,12 @@ build_and_run() {
 
     echo -e "${GREEN}Stopping any existing container...${NC}"
     docker stop cookie-rtmps 2>/dev/null || true
-    docker rm cookie-rtmps 2>/dev/null || true
+    docker rm -v -f cookie-rtmps 2>/dev/null || true
 
     echo -e "${GREEN}Starting container...${NC}"
 
-    # Port mapping logic: Map HTTP/HTTPS only if domain is set
+    # Expose only RTMP port (no web/HTML/stats ports exposed)
     PORT_MAPS="-p ${PORT_RTMP}:1935"
-    if [ ! -z "$SERVER_DOMAIN" ]; then
-        PORT_MAPS="$PORT_MAPS -p ${PORT_HTTP}:80"
-    fi
 
     # Start the container
     docker run -d --name cookie-rtmps \
@@ -1393,10 +1435,6 @@ build_and_run() {
         -e APP_NAME="$APP_NAME" \
         -e ACCEPTED_IP="$ACCEPTED_IP" \
         -e CHUNK_SIZE="$CHUNK_SIZE" \
-        -e STREAM_BASE_TITLE="$STREAM_BASE_TITLE" \
-        -e TWITCH_CLIENT_ID="$TWITCH_CLIENT_ID" \
-        -e TWITCH_OAUTH_TOKEN="$TWITCH_OAUTH_TOKEN" \
-        -e TWITCH_BROADCASTER_ID="$TWITCH_BROADCASTER_ID" \
         -e SERVER_DOMAIN="$SERVER_DOMAIN" \
         -e NOALBS_ENABLED="$NOALBS_ENABLED" \
         -e FALLBACK_MODE="$FALLBACK_MODE" \
@@ -1418,7 +1456,6 @@ build_and_run() {
         echo -e "${GREEN}Container 'cookie-rtmps' is running!${NC}"
         echo -e "You can stream to: rtmp://${DISPLAY_HOST}:${PORT_RTMP}/${APP_NAME}"
         echo -e "Vertical stream:  rtmp://${DISPLAY_HOST}:${PORT_RTMP}/vertical"
-        echo -e "Stats available at: http://${DISPLAY_HOST}/stat"
 
         echo -e "${YELLOW}Resetting services and running integration tests...${NC}"
         docker restart cookie-rtmps
@@ -1443,7 +1480,7 @@ view_logs() {
         return
     fi
 
-    echo -e "${YELLOW}Showing live logs for cookie-rtmps (Filtering /stat polling requests)...${NC}"
+    echo -e "${YELLOW}Showing live logs for cookie-rtmps...${NC}"
     echo -e "${YELLOW}(Press Ctrl+C to exit log view)${NC}\n"
     # Use a subshell and trap INT to ensure script doesn't exit on Ctrl+C
     (
@@ -1499,69 +1536,113 @@ view_logs() {
 }
 
 deep_cleanup_ports_and_processes() {
-    echo -e "${YELLOW}Cleaning up host processes and freeing ports (1935, 8443, 8081, 19350-19358)...${NC}"
-    local PORTS=(1935 8443 8081 19350 19351 19352 19353 19354 19355 19356 19357 19358)
+    echo -e "${YELLOW}Cleaning up RTMP processes and unbinding RTMP/web ports (excluding sensitive ports 80, 443, 22, 53, etc.)...${NC}"
+    if [ "$EUID" -ne 0 ] && command -v sudo &> /dev/null; then
+        SUDO="sudo"
+    else
+        SUDO=""
+    fi
+
+    local RAW_PORTS=("$PORT_RTMP" 81 1935 1936 8080 8081 8088 8443 8888 9997 9998 19350 19351 19352 19353 19354 19355 19356 19357 19358 19359)
+    local PORTS=()
+    for p in "${RAW_PORTS[@]}"; do
+        if [ -n "$p" ] && ! is_sensitive_port "$p"; then
+            PORTS+=("$p")
+        fi
+    done
+
+    # Find and stop any docker containers publishing non-sensitive RTMP/web application ports
+    if command -v docker &> /dev/null; then
+        for port in "${PORTS[@]}"; do
+            local cids
+            cids=$(docker ps -q --filter "publish=$port" 2>/dev/null || true)
+            if [ -n "$cids" ]; then
+                docker stop $cids 2>/dev/null || true
+                docker rm -v -f $cids 2>/dev/null || true
+            fi
+        done
+    fi
+
     for port in "${PORTS[@]}"; do
         if command -v fuser &> /dev/null; then
-            fuser -k -9 "${port}/tcp" 2>/dev/null || true
-        elif command -v lsof &> /dev/null; then
+            $SUDO fuser -k -9 "${port}/tcp" 2>/dev/null || true
+            $SUDO fuser -k -9 "${port}/udp" 2>/dev/null || true
+        fi
+        if command -v lsof &> /dev/null; then
             local pids
-            pids=$(lsof -t -i :"$port" 2>/dev/null || true)
+            pids=$($SUDO lsof -t -i :"$port" 2>/dev/null || true)
             if [ -n "$pids" ]; then
-                kill -9 $pids 2>/dev/null || true
+                $SUDO kill -9 $pids 2>/dev/null || true
+            fi
+        fi
+        if command -v ss &> /dev/null; then
+            local pids
+            pids=$($SUDO ss -lptn "sport = :$port" 2>/dev/null | grep -oP 'pid=\K\d+' | sort -u || true)
+            if [ -n "$pids" ]; then
+                $SUDO kill -9 $pids 2>/dev/null || true
             fi
         fi
     done
 
-    # Terminate any leftover host processes if any were spawned outside container
-    pkill -f "tiktok_pusher.py" 2>/dev/null || true
-    pkill -f "noalbs.py" 2>/dev/null || true
-    pkill -f "stream_validator" 2>/dev/null || true
+    # Terminate any leftover RTMP/RTMPS host processes without touching host web servers on ports 80/443
+    $SUDO pkill -f "tiktok_pusher" 2>/dev/null || true
+    $SUDO pkill -f "noalbs" 2>/dev/null || true
+    $SUDO pkill -f "stream_validator" 2>/dev/null || true
+    $SUDO pkill -f "update_titles" 2>/dev/null || true
+    $SUDO pkill -f "cookie-rtmps" 2>/dev/null || true
+    $SUDO pkill -f "stunnel.*1935" 2>/dev/null || true
+    $SUDO pkill -f "nginx.*rtmp" 2>/dev/null || true
 }
 
 stop_and_uninstall() {
-    if ! command -v docker &> /dev/null; then
-        echo -e "${RED}Docker is not installed!${NC}"
-        sleep 2
-        return
-    fi
-    echo -e "${YELLOW}Stopping services and performing complete removal...${NC}"
-    OLD_CONTAINERS=$(docker ps -a --format '{{.ID}} {{.Names}}' | grep -iE 'rtmp|cookie|prism' | awk '{print $1}')
-    if [ ! -z "$OLD_CONTAINERS" ]; then
-        docker stop $OLD_CONTAINERS 2>/dev/null && echo -e "${GREEN}Containers stopped.${NC}" || true
-        docker rm -v -f $OLD_CONTAINERS 2>/dev/null && echo -e "${GREEN}Containers and volumes removed, ports unbound.${NC}" || true
-    else
-        docker stop cookie-rtmps 2>/dev/null && echo -e "${GREEN}Container stopped.${NC}" || echo -e "${RED}Container not running.${NC}"
-        docker rm -v -f cookie-rtmps 2>/dev/null && echo -e "${GREEN}Container and volumes removed, ports unbound.${NC}" || true
+    echo -e "${YELLOW}Stopping services, unbinding RTMP ports, and performing deep uninstall & removal...${NC}"
+
+    if command -v docker &> /dev/null; then
+        # Deep search all containers (running or stopped) mentioning RTMP, RTMPS, cookie, or prism
+        OLD_CONTAINERS=$(docker ps -a --format '{{.ID}} {{.Names}} {{.Image}} {{.Labels}}' | grep -iE 'rtmp|rtmps|cookie|prism|nginx-rtmp' | awk '{print $1}' | sort -u)
+        if [ ! -z "$OLD_CONTAINERS" ]; then
+            docker stop $OLD_CONTAINERS 2>/dev/null && echo -e "${GREEN}RTMP/RTMPS containers stopped.${NC}" || true
+            docker rm -v -f $OLD_CONTAINERS 2>/dev/null && echo -e "${GREEN}RTMP/RTMPS containers and volumes removed.${NC}" || true
+        else
+            docker stop cookie-rtmps 2>/dev/null || true
+            docker rm -v -f cookie-rtmps 2>/dev/null || true
+        fi
     fi
 
-    OLD_VOLUMES=$(docker volume ls -q | grep -iE 'rtmp|cookie|prism' || true)
-    if [ ! -z "$OLD_VOLUMES" ]; then
-        docker volume rm -f $OLD_VOLUMES 2>/dev/null && echo -e "${GREEN}Matching Docker volumes removed.${NC}" || true
-    fi
-
-    OLD_IMAGES=$(docker images --format '{{.ID}} {{.Repository}}' | grep -iE 'rtmp|cookie|prism' | awk '{print $1}')
-    if [ ! -z "$OLD_IMAGES" ]; then
-        docker rmi -f $OLD_IMAGES 2>/dev/null && echo -e "${GREEN}Images removed.${NC}" || true
-    else
-        docker rmi -f cookie-rtmps 2>/dev/null && echo -e "${GREEN}Image removed.${NC}" || true
-    fi
-
+    echo -e "${YELLOW}Unbinding RTMP-related ports (excluding sensitive ports 80, 443, etc.) and stopping RTMP processes...${NC}"
     deep_cleanup_ports_and_processes
 
-    echo -e "${YELLOW}Pruning Docker build cache, volumes, networks, and unused images...${NC}"
-    docker volume prune -f 2>/dev/null || true
-    docker network prune -f 2>/dev/null || true
-    docker image prune -a -f 2>/dev/null || true
-    docker builder prune -a -f 2>/dev/null || true
-    docker system prune -a -f 2>/dev/null || true
+    if command -v docker &> /dev/null; then
+        OLD_VOLUMES=$(docker volume ls -q | grep -iE 'rtmp|rtmps|cookie|prism' || true)
+        if [ ! -z "$OLD_VOLUMES" ]; then
+            docker volume rm -f $OLD_VOLUMES 2>/dev/null && echo -e "${GREEN}Matching Docker volumes removed.${NC}" || true
+        fi
 
-    echo -e "${YELLOW}Removing local configuration files and data cache...${NC}"
-    rm -f rtmp_config.env
-    rm -rf ./data
-    echo -e "${GREEN}Local configuration and data removed.${NC}"
+        OLD_NETWORKS=$(docker network ls --format '{{.ID}} {{.Name}}' | grep -iE 'rtmp|rtmps|cookie|prism' | awk '{print $1}' || true)
+        if [ ! -z "$OLD_NETWORKS" ]; then
+            docker network rm $OLD_NETWORKS 2>/dev/null && echo -e "${GREEN}Matching Docker networks removed.${NC}" || true
+        fi
 
-    echo -e "${GREEN}CookieRTMPS and all cached components have been completely removed.${NC}"
+        OLD_IMAGES=$(docker images --format '{{.ID}} {{.Repository}} {{.Tag}}' | grep -iE 'rtmp|rtmps|cookie|prism' | awk '{print $1}' | sort -u)
+        if [ ! -z "$OLD_IMAGES" ]; then
+            docker rmi -f $OLD_IMAGES 2>/dev/null && echo -e "${GREEN}RTMP/RTMPS images removed.${NC}" || true
+        else
+            docker rmi -f cookie-rtmps 2>/dev/null || true
+        fi
+
+        echo -e "${YELLOW}Pruning Docker build cache, volumes, networks, and unused images...${NC}"
+        docker volume prune -f 2>/dev/null || true
+        docker network prune -f 2>/dev/null || true
+        docker image prune -a -f 2>/dev/null || true
+        docker builder prune -a -f 2>/dev/null || true
+        docker system prune -a -f 2>/dev/null || true
+    fi
+
+    echo -e "${YELLOW}Deep cleaning all local configuration, temp files, and cache files...${NC}"
+    cleanup_old_rtmp_files "true"
+    echo -e "${GREEN}Local configuration, temp files, and data cache removed.${NC}"
+
+    echo -e "${GREEN}CookieRTMPS and all RTMP/RTMPS components have been completely uninstalled and RTMP ports unbound.${NC}"
     sleep 3
 }
 
@@ -1577,24 +1658,20 @@ while true; do
     echo -e "${YELLOW}Quick Reference:${NC}"
     echo -e "  RTMP Ingest:     rtmp://${DISPLAY_HOST}:${PORT_RTMP}/${APP_NAME}"
     echo -e "  Vertical Ingest: rtmp://${DISPLAY_HOST}:${PORT_RTMP}/vertical"
-    echo -e "  Stats URL:       http://${DISPLAY_HOST}/stat"
-    echo -e "  Combined Chat:   http://${DISPLAY_HOST}/chat.html?twitch=USER&youtube=ID"
     echo "-------------------------------------"
     echo "1) Install Docker (if not installed)"
     echo "2) Configure Stream Keys (Horizontal)"
     echo "3) Configure Stream Keys (Vertical)"
     echo "4) Configure OBS Setup & Security Key"
     echo "5) Configure IP Whitelist (Optional)"
-    echo "6) Configure Combined Chat (Optional)"
-        echo "7) Configure Stream Titles & Twitch API (Optional)"
-        echo "8) Configure Domain / Reverse Proxy (Optional)"
-        echo "9) Configure Optimizations (Chunk Size)"
-        echo "10) Configure NOALBS Scene Switcher"
-        echo "11) Build & Start Server"
-        echo "12) Run Integration Tests"
-        echo "13) Stop Server & Uninstall"
-        echo "14) View Logs"
-        echo "15) Quit"
+    echo "6) Configure Domain / Reverse Proxy (Optional)"
+    echo "7) Configure Optimizations (Chunk Size)"
+    echo "8) Configure NOALBS Scene Switcher"
+    echo "9) Build & Start Server"
+    echo "10) Run Integration Tests"
+    echo "11) Stop Server & Uninstall"
+    echo "12) View Logs"
+    echo "13) Quit"
     echo -e "Select an option: \c"
     read -r option
 
@@ -1604,16 +1681,14 @@ while true; do
         3) configure_vertical_keys ;;
         4) configure_obs ;;
         5) configure_whitelist ;;
-        6) configure_chat ;;
-        7) configure_titles ;;
-        8) configure_domain ;;
-        9) configure_optimizations ;;
-        10) configure_noalbs ;;
-        11) build_and_run ;;
-        12) if [ -f "./integration_test.sh" ]; then chmod +x ./integration_test.sh; ./integration_test.sh; else echo -e "${RED}Test script not found.${NC}"; fi; echo -e "Press Enter to continue..."; read -r ;;
-        13) stop_and_uninstall ;;
-        14) view_logs ;;
-        15) clear; echo -e "${GREEN}Goodbye!${NC}"; break ;;
+        6) configure_domain ;;
+        7) configure_optimizations ;;
+        8) configure_noalbs ;;
+        9) build_and_run ;;
+        10) if [ -f "./integration_test.sh" ]; then chmod +x ./integration_test.sh; ./integration_test.sh; else echo -e "${RED}Test script not found.${NC}"; fi; echo -e "Press Enter to continue..."; read -r ;;
+        11) stop_and_uninstall ;;
+        12) view_logs ;;
+        13) clear; echo -e "${GREEN}Goodbye!${NC}"; break ;;
         *) echo -e "${RED}Invalid option${NC}"; sleep 1 ;;
     esac
 done
