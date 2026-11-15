@@ -24,7 +24,7 @@ TIKTOK_KEY=""
 TIKTOK_SL_TOKEN=""
 TIKTOK_TITLE=""
 TIKTOK_GAME_ID=""
-TWITCH_URL="rtmp://ingest.global-contribute.live-video.net/app/"
+TWITCH_URL="rtmp://127.0.0.1:19353/app/"
 TWITCH_KEY=""
 KICK_URL="rtmp://127.0.0.1:19356/kick/"
 KICK_KEY=""
@@ -38,7 +38,7 @@ RTMP1_KEY=""
 # Vertical Defaults
 V_YOUTUBE_URL="rtmp://a.rtmp.youtube.com/live2/"
 V_YOUTUBE_KEY=""
-V_TWITCH_URL="rtmp://ingest.global-contribute.live-video.net/app/"
+V_TWITCH_URL="rtmp://127.0.0.1:19353/app/"
 V_TWITCH_KEY=""
 V_KICK_URL="rtmp://127.0.0.1:19356/kick/"
 V_KICK_KEY=""
@@ -150,6 +150,37 @@ PORT_RTMP="$PORT_RTMP"
 ENV_EOF
 }
 
+recover_config_from_container() {
+    if ! command -v docker &> /dev/null; then
+        return 1
+    fi
+    local cid
+    cid=$(docker ps -a --format '{{.ID}} {{.Names}}' | grep -iE 'cookie-rtmps|rtmp' | head -n 1 | awk '{print $1}')
+    if [ -z "$cid" ]; then
+        return 1
+    fi
+
+    local env_lines
+    env_lines=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$cid" 2>/dev/null || true)
+    if [ -z "$env_lines" ]; then
+        return 1
+    fi
+
+    local allowed_vars="YOUTUBE_URL YOUTUBE_KEY FACEBOOK_URL FACEBOOK_KEY INSTAGRAM_URL INSTAGRAM_KEY TIKTOK_URL TIKTOK_KEY TIKTOK_SL_TOKEN TIKTOK_TITLE TIKTOK_GAME_ID TWITCH_URL TWITCH_KEY KICK_URL KICK_KEY X_URL X_KEY TROVO_URL TROVO_KEY RTMP1_URL RTMP1_KEY V_YOUTUBE_URL V_YOUTUBE_KEY V_TWITCH_URL V_TWITCH_KEY V_KICK_URL V_KICK_KEY V_TIKTOK_URL V_TIKTOK_KEY V_FACEBOOK_URL V_FACEBOOK_KEY V_INSTAGRAM_URL V_INSTAGRAM_KEY V_X_URL V_X_KEY V_TROVO_URL V_TROVO_KEY V_RTMP1_URL V_RTMP1_KEY OBS_KEY APP_NAME ACCEPTED_IP SERVER_DOMAIN CHUNK_SIZE FALLBACK_MODE OBS_WS_HOST OBS_WS_PORT OBS_WS_PASSWORD OBS_SCENE_LIVE OBS_SCENE_BRB LOW_BITRATE RESTORE_BITRATE BRB_VIDEO_URL CLOUD_BRB_TIMEOUT"
+    local recovered=0
+    while IFS='=' read -r k v; do
+        if [[ " $allowed_vars " == *" $k "* ]] && [ -n "$v" ]; then
+            printf -v "$k" "%s" "$v"
+            recovered=1
+        fi
+    done <<< "$env_lines"
+
+    if [ "$recovered" -eq 1 ]; then
+        return 0
+    fi
+    return 1
+}
+
 sync_and_preserve_installation() {
     local found_config=""
     local newest_mtime=0
@@ -183,14 +214,18 @@ sync_and_preserve_installation() {
         fi
     done
 
-    # Import and load existing configuration if found
     if [ -n "$found_config" ]; then
         if [ "$found_config" != "$CONFIG_FILE" ]; then
             cp -f "$found_config" "$CONFIG_FILE" 2>/dev/null || true
         fi
-        # Load only valid non-HTML/non-deprecated keys
         source "$CONFIG_FILE"
         unset CHAT_TWITCH CHAT_YOUTUBE CHAT_KICK CHAT_TIKTOK STREAM_BASE_TITLE TWITCH_CLIENT_ID TWITCH_OAUTH_TOKEN TWITCH_BROADCASTER_ID PORT_HTTP PORT_STATS
+    else
+        # Fallback: recover keys/settings from an existing container if folder was freshly cloned
+        if recover_config_from_container; then
+            write_config_to_path "$CONFIG_FILE"
+            found_config="$CONFIG_FILE"
+        fi
     fi
 
     # Replace existing install.sh and updated repo files in any previous installation directory while keeping settings
@@ -206,25 +241,17 @@ sync_and_preserve_installation() {
         if [ -d "$old_dir" ] && [ "$old_dir" != "$SCRIPT_DIR" ] && [ -f "$old_dir/install.sh" ]; then
             cp -f "$SCRIPT_DIR/install.sh" "$old_dir/install.sh" 2>/dev/null || true
             chmod +x "$old_dir/install.sh" 2>/dev/null || true
-            for repo_item in Dockerfile docker-entrypoint.sh integration_test.sh stream_validator.py tiktok_pusher.py test_noalbs.py; do
+            for repo_item in Dockerfile docker-entrypoint.sh integration_test.sh stream_validator.py update_titles.py tiktok_pusher.py test_noalbs.py chat.html; do
                 if [ -f "$SCRIPT_DIR/$repo_item" ]; then
                     cp -f "$SCRIPT_DIR/$repo_item" "$old_dir/$repo_item" 2>/dev/null || true
                 fi
             done
-            if [ -d "$SCRIPT_DIR/nginx" ]; then
-                rm -rf "$old_dir/nginx" 2>/dev/null || true
-                cp -rf "$SCRIPT_DIR/nginx" "$old_dir/nginx" 2>/dev/null || true
-            fi
-            if [ -d "$SCRIPT_DIR/stunnel" ]; then
-                rm -rf "$old_dir/stunnel" 2>/dev/null || true
-                cp -rf "$SCRIPT_DIR/stunnel" "$old_dir/stunnel" 2>/dev/null || true
-            fi
-            if [ -d "$SCRIPT_DIR/cookie-nginx-rtmp" ]; then
-                rm -rf "$old_dir/cookie-nginx-rtmp" 2>/dev/null || true
-                cp -rf "$SCRIPT_DIR/cookie-nginx-rtmp" "$old_dir/cookie-nginx-rtmp" 2>/dev/null || true
-            fi
-            # Remove any deprecated HTML/title scripts from previous installs
-            rm -f "$old_dir/chat.html" "$old_dir/update_titles.py" 2>/dev/null || true
+            for repo_dir in nginx stunnel cookie-nginx-rtmp noalbs; do
+                if [ -d "$SCRIPT_DIR/$repo_dir" ]; then
+                    rm -rf "$old_dir/$repo_dir" 2>/dev/null || true
+                    cp -rf "$SCRIPT_DIR/$repo_dir" "$old_dir/$repo_dir" 2>/dev/null || true
+                fi
+            done
             if [ -f "$CONFIG_FILE" ]; then
                 cp -f "$CONFIG_FILE" "$old_dir/rtmp_config.env" 2>/dev/null || true
             fi
@@ -1220,8 +1247,8 @@ cleanup_old_rtmp_files() {
         SUDO=""
     fi
 
-    echo -e "${YELLOW}Cleaning up old RTMP temporary, HTML/stats, and cache files...${NC}"
-    rm -f ./get-docker.sh ./*.tmp ./*.log ./episode_count.txt 2>/dev/null || true
+    echo -e "${YELLOW}Cleaning up old RTMP temporary and cache files...${NC}"
+    rm -f ./get-docker.sh ./*.tmp ./*.log 2>/dev/null || true
 
     if [ "$full_wipe" == "true" ]; then
         rm -f "$CONFIG_FILE" 2>/dev/null || true
@@ -1229,14 +1256,14 @@ cleanup_old_rtmp_files() {
         $SUDO rm -rf "$PERSIST_SYS_DIR" 2>/dev/null || true
     else
         if [ -d "./data" ]; then
-            rm -f ./data/*.tmp ./data/*.log ./data/*.pid ./data/*.sock ./data/*.flv ./data/*.ts ./data/*.m3u8 ./data/*.html ./data/*.xsl ./data/episode_count.txt 2>/dev/null || true
+            rm -f ./data/*.tmp ./data/*.log ./data/*.pid ./data/*.sock ./data/*.flv ./data/*.ts ./data/*.m3u8 2>/dev/null || true
             if [ "$NOALBS_ENABLED" != "true" ] || [ "$CLOUD_BRB" != "true" ]; then
                 rm -f ./data/brb_video.mp4 ./data/brb_video.mp4.tmp 2>/dev/null || true
             fi
         fi
     fi
 
-    # Deep remove temp, cache, and runtime HTML/stats artifacts across system temp/cache directories
+    # Deep remove temp and cache artifacts across system temp/cache directories
     for base_dir in /tmp /var/tmp /var/run /var/cache /dev/shm; do
         if [ -d "$base_dir" ]; then
             $SUDO find "$base_dir" -maxdepth 3 \( \
@@ -1248,9 +1275,6 @@ cleanup_old_rtmp_files() {
                 -iname "*noalbs*" -o \
                 -iname "*stream_validator*" -o \
                 -iname "*tiktok_pusher*" -o \
-                -iname "*update_titles*" -o \
-                -iname "*chat.html*" -o \
-                -iname "*stat.xsl*" -o \
                 -iname "*nginx-client-body*" \
             \) -exec rm -rf {} + 2>/dev/null || true
         fi
@@ -1276,7 +1300,7 @@ build_and_run() {
     fi
     docker image prune -f 2>/dev/null || true
 
-    # Clear non-sensitive RTMP and unused web/stats port conflicts and stale files before building
+    # Clear non-sensitive RTMP port conflicts and stale files before building
     deep_cleanup_ports_and_processes
     cleanup_old_rtmp_files "false"
 
@@ -1385,10 +1409,10 @@ build_and_run() {
 
     echo -e "${GREEN}Starting container...${NC}"
 
-    # Expose only RTMP port (no web/HTML/stats ports exposed)
+    # Expose only RTMP port on host (no web/HTML/stats ports exposed)
     PORT_MAPS="-p ${PORT_RTMP}:1935"
 
-    # Start the container
+    # Start the container (pass empty defaults for internal validator env vars so on_publish always works)
     docker run -d --name cookie-rtmps \
         $PORT_MAPS \
         --restart unless-stopped \
@@ -1435,6 +1459,10 @@ build_and_run() {
         -e APP_NAME="$APP_NAME" \
         -e ACCEPTED_IP="$ACCEPTED_IP" \
         -e CHUNK_SIZE="$CHUNK_SIZE" \
+        -e STREAM_BASE_TITLE="" \
+        -e TWITCH_CLIENT_ID="" \
+        -e TWITCH_OAUTH_TOKEN="" \
+        -e TWITCH_BROADCASTER_ID="" \
         -e SERVER_DOMAIN="$SERVER_DOMAIN" \
         -e NOALBS_ENABLED="$NOALBS_ENABLED" \
         -e FALLBACK_MODE="$FALLBACK_MODE" \
