@@ -1018,16 +1018,19 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV DISPLAY=:99
 ENV LIBGL_ALWAYS_SOFTWARE=1
 ENV MESA_GL_VERSION_OVERRIDE=3.3
+ENV MESA_GLSL_VERSION_OVERRIDE=330
 ENV QT_QPA_PLATFORM=xcb
 
 RUN printf 'Acquire::ForceIPv4 "true";\nAcquire::http::Timeout "15";\nAcquire::Retries "2";\n' > /etc/apt/apt.conf.d/99fast \
-    && printf 'deb http://mirrors.edge.kernel.org/ubuntu/ noble main universe\n' > /etc/apt/sources.list \
+    && printf 'deb http://mirrors.edge.kernel.org/ubuntu/ noble main universe\ndeb http://mirrors.edge.kernel.org/ubuntu/ noble-updates main universe\ndeb http://mirrors.edge.kernel.org/ubuntu/ noble-security main universe\n' > /etc/apt/sources.list \
     && rm -f /etc/apt/sources.list.d/* \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
+        libegl-mesa0 \
         libgl1-mesa-dri \
+        libgles2 \
         libglx-mesa0 \
         libnginx-mod-rtmp \
         nginx-light \
@@ -1261,6 +1264,8 @@ else:
             "looping": should_loop,
             "restart_on_activate": True,
             "clear_on_media_end": False,
+            "close_when_inactive": False,
+            "buffering_mb": 2,
             "reconnect_delay_sec": 2,
             "hw_decode": False,
         },
@@ -1670,6 +1675,7 @@ async def run_controller():
     state = "IDLE"  # IDLE -> LIVE <-> BRB -> IDLE
     low_streak = 0
     restore_streak = 0
+    live_started_at = None
     brb_started_at = None
 
     while True:
@@ -1677,22 +1683,25 @@ async def run_controller():
             publishing, kbps, active_name = get_ingest_stats()
 
             if state == "IDLE":
-                if publishing and kbps > 50:
-                    print(f"[NOALBS] Live ingest detected ({kbps:.0f} kbps). Switching to '{OBS_SCENE_LIVE}' and starting stream...", flush=True)
+                if publishing:
+                    print(f"[NOALBS] Live ingest detected (stream='{active_name}', {kbps:.0f} kbps). Switching to '{OBS_SCENE_LIVE}' and starting stream...", flush=True)
                     await obs.restart_rtmp_source(active_name)
                     await obs.set_scene(OBS_SCENE_LIVE)
                     await obs.start_stream()
                     state = "LIVE"
+                    live_started_at = time.monotonic()
                     low_streak = 0
                     restore_streak = 0
                     brb_started_at = None
 
             elif state == "LIVE":
-                if (not publishing) or (kbps < LOW_BITRATE):
+                # Nginx-RTMP bw_in averages over a 10s window; ignore low kbps during initial 10s ramp-up unless publisher disconnects
+                in_warmup = (time.monotonic() - (live_started_at or 0.0)) < 10.0
+                if (not publishing) or (not in_warmup and kbps < LOW_BITRATE):
                     low_streak += 1
                     if low_streak >= 3:
                         print(
-                            f"[NOALBS] Bitrate dropped ({kbps:.0f} kbps < {LOW_BITRATE:.0f} kbps). "
+                            f"[NOALBS] Bitrate dropped ({kbps:.0f} kbps < {LOW_BITRATE:.0f} kbps, publishing={publishing}). "
                             f"Switching to '{OBS_SCENE_BRB}' (loop={BRB_VIDEO_LOOP}, timeout={CLOUD_BRB_TIMEOUT}s).",
                             flush=True,
                         )
@@ -1717,6 +1726,7 @@ async def run_controller():
                         await obs.restart_rtmp_source(active_name)
                         await obs.set_scene(OBS_SCENE_LIVE)
                         state = "LIVE"
+                        live_started_at = time.monotonic()
                         low_streak = 0
                         restore_streak = 0
                         brb_started_at = None
@@ -1732,6 +1742,7 @@ async def run_controller():
                         drop_ingest_publisher()
                         await obs.set_scene(OBS_SCENE_LIVE)
                         state = "IDLE"
+                        live_started_at = None
                         low_streak = 0
                         restore_streak = 0
                         brb_started_at = None
@@ -1756,10 +1767,14 @@ CONTROLLER_PY_EOF
 set -e
 
 export XDG_RUNTIME_DIR=/tmp/runtime-root
-mkdir -p "$XDG_RUNTIME_DIR"
+export PULSE_RUNTIME_PATH="$XDG_RUNTIME_DIR/pulse"
+mkdir -p "$XDG_RUNTIME_DIR" "$PULSE_RUNTIME_PATH"
 chmod 700 "$XDG_RUNTIME_DIR"
 
 python3 /opt/obs-bridge/setup_obs.py
+
+# Ensure no stale OBS sentinel folder triggers Safe Mode prompt
+rm -rf /root/.config/obs-studio/.sentinel
 
 # Start Nginx-RTMP Ingest Receiver
 nginx
@@ -1769,7 +1784,7 @@ rm -f /tmp/.X99-lock /tmp/.X11-unix/X99
 Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset >/tmp/xvfb.log 2>&1 &
 sleep 1
 
-pulseaudio --start --exit-idle-time=-1 --log-target=file:/tmp/pulse.log 2>/dev/null || true
+pulseaudio -D --exit-idle-time=-1 --disallow-exit --log-target=file:/tmp/pulse.log 2>/dev/null || true
 pactl load-module module-null-sink sink_name=obs_virtual_sink sink_properties=device.description="OBS_Virtual_Audio" >/dev/null 2>&1 || true
 pactl set-default-sink obs_virtual_sink >/dev/null 2>&1 || true
 
@@ -1830,7 +1845,6 @@ run_full_integration_tests() {
         record_fail "Container 'cookie-rtmps' is NOT running."
     fi
 
-    # Wait up to 15s for cookie-rtmps entrypoint to finish apt/setup and start nginx & stunnel
     for _ in $(seq 1 30); do
         if docker exec cookie-rtmps pgrep -f "nginx" >/dev/null 2>&1; then
             break
@@ -2460,9 +2474,9 @@ if p.exists():
         fi
 
         echo -e "${YELLOW}Waiting for Lightweight OBS & WebSocket server to initialize...${NC}"
-        for _ in $(seq 1 20); do
+        for _ in $(seq 1 30); do
             if python3 -c "import socket; s=socket.create_connection(('127.0.0.1', int('$PORT_RTMP')), 0.5); s.close()" 2>/dev/null \
-               && docker exec cookie-rtmps-obs pgrep -x obs >/dev/null 2>&1; then
+               && python3 -c "import socket; s=socket.create_connection(('127.0.0.1', int('$OBS_WS_PORT')), 0.5); s.close()" 2>/dev/null; then
                 break
             fi
             sleep 0.5
