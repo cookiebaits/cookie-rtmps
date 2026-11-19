@@ -1020,8 +1020,8 @@ ENV LIBGL_ALWAYS_SOFTWARE=1
 ENV MESA_GL_VERSION_OVERRIDE=3.3
 ENV QT_QPA_PLATFORM=xcb
 
-RUN echo 'deb [trusted=yes] https://ppa.launchpadcontent.net/obsproject/obs-studio/ubuntu noble main' > /etc/apt/sources.list.d/obs-studio.list \
-    && apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 update \
+RUN echo 'deb [trusted=yes] http://ppa.launchpadcontent.net/obsproject/obs-studio/ubuntu noble main' > /etc/apt/sources.list.d/obs-studio.list \
+    && (apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=10 update || true) \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
@@ -1036,7 +1036,7 @@ RUN echo 'deb [trusted=yes] https://ppa.launchpadcontent.net/obsproject/obs-stud
         xvfb \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* \
-    && find /usr/lib -name "obs-browser.so" | grep -q . \
+    && command -v obs >/dev/null \
     && find /usr/lib -name "obs-websocket.so" | grep -q .
 
 WORKDIR /opt/obs-bridge
@@ -1102,6 +1102,7 @@ HTML_EOF
     cat << 'SETUP_PY_EOF' > "$BRIDGE_DIR/setup_obs.py"
 #!/usr/bin/env python3
 import configparser
+import glob
 import json
 import os
 import urllib.parse
@@ -1185,25 +1186,99 @@ basic_ini["Audio"] = {
 with open(os.path.join(profile_dir, "basic.ini"), "w", encoding="utf-8") as f:
     basic_ini.write(f, space_around_delimiters=False)
 
-# 3. OBS Output Target -> CookieRTMPS internal relay
+# 3. OBS Output Target -> CookieRTMPS internal relay (ensure non-empty RTMP stream name)
+relay_stream_key = OBS_KEY if OBS_KEY else "cookiertmps"
 service_json = {
     "type": "rtmp_custom",
     "settings": {
         "server": f"rtmp://{RELAY_HOST}:{INTERNAL_RTMP_PORT}/{APP_NAME}",
-        "key": OBS_KEY,
+        "key": relay_stream_key,
         "use_auth": False,
     },
 }
 with open(os.path.join(profile_dir, "service.json"), "w", encoding="utf-8") as f:
     json.dump(service_json, f, indent=2)
 
-# 4. OBS Scene Collection with 2 scenes: 'main' (RTMP feed) and 'brb' (Full-screen Browser Source MP4)
+# 4. OBS Scene Collection with 2 scenes: 'main' (RTMP feed) and 'brb' (Full-screen MP4 URL)
 ingest_url = f"rtmp://127.0.0.1:{PORT_RTMP}/{APP_NAME}"
 if OBS_KEY:
     ingest_url = f"{ingest_url}/{OBS_KEY}"
 
+has_obs_browser = bool(
+    glob.glob("/usr/lib/**/obs-browser.so", recursive=True)
+    or glob.glob("/usr/local/lib/**/obs-browser.so", recursive=True)
+)
+
 encoded_mp4 = urllib.parse.quote(BRB_VIDEO_URL, safe="")
 brb_browser_url = f"http://127.0.0.1:8090/brb.html?src={encoded_mp4}&loop={BRB_VIDEO_LOOP}"
+should_loop = BRB_VIDEO_LOOP.lower() == "true"
+
+if has_obs_browser:
+    brb_source_def = {
+        "prev_ver": 503316480,
+        "name": "BRB_Browser_Source",
+        "uuid": "44444444-4444-4444-8444-444444444444",
+        "id": "browser_source",
+        "versioned_id": "browser_source",
+        "settings": {
+            "url": brb_browser_url,
+            "width": 1920,
+            "height": 1080,
+            "fps": 30,
+            "reroute_audio": True,
+            "restart_when_active": True,
+            "shutdown": False,
+        },
+        "mixers": 255,
+        "sync": 0,
+        "flags": 0,
+        "volume": 1.0,
+        "balance": 0.5,
+        "enabled": True,
+        "muted": False,
+        "push-to-mute": False,
+        "push-to-mute-delay": 0,
+        "push-to-talk": False,
+        "push-to-talk-delay": 0,
+        "hotkeys": {},
+        "deinterlace_mode": 0,
+        "deinterlace_field_order": 0,
+        "monitoring_type": 0,
+        "private_settings": {},
+    }
+else:
+    brb_source_def = {
+        "prev_ver": 503316480,
+        "name": "BRB_Browser_Source",
+        "uuid": "44444444-4444-4444-8444-444444444444",
+        "id": "ffmpeg_source",
+        "versioned_id": "ffmpeg_source",
+        "settings": {
+            "is_local_file": False,
+            "input": BRB_VIDEO_URL,
+            "looping": should_loop,
+            "restart_on_activate": True,
+            "clear_on_media_end": False,
+            "reconnect_delay_sec": 2,
+            "hw_decode": False,
+        },
+        "mixers": 255,
+        "sync": 0,
+        "flags": 0,
+        "volume": 1.0,
+        "balance": 0.5,
+        "enabled": True,
+        "muted": False,
+        "push-to-mute": False,
+        "push-to-mute-delay": 0,
+        "push-to-talk": False,
+        "push-to-talk-delay": 0,
+        "hotkeys": {},
+        "deinterlace_mode": 0,
+        "deinterlace_field_order": 0,
+        "monitoring_type": 0,
+        "private_settings": {},
+    }
 
 def make_scene_item(item_id, name, source_uuid):
     return {
@@ -1334,38 +1409,7 @@ scene_collection = {
             "monitoring_type": 0,
             "private_settings": {},
         },
-        {
-            "prev_ver": 503316480,
-            "name": "BRB_Browser_Source",
-            "uuid": "44444444-4444-4444-8444-444444444444",
-            "id": "browser_source",
-            "versioned_id": "browser_source",
-            "settings": {
-                "url": brb_browser_url,
-                "width": 1920,
-                "height": 1080,
-                "fps": 30,
-                "reroute_audio": True,
-                "restart_when_active": True,
-                "shutdown": False,
-            },
-            "mixers": 255,
-            "sync": 0,
-            "flags": 0,
-            "volume": 1.0,
-            "balance": 0.5,
-            "enabled": True,
-            "muted": False,
-            "push-to-mute": False,
-            "push-to-mute-delay": 0,
-            "push-to-talk": False,
-            "push-to-talk-delay": 0,
-            "hotkeys": {},
-            "deinterlace_mode": 0,
-            "deinterlace_field_order": 0,
-            "monitoring_type": 0,
-            "private_settings": {},
-        },
+        brb_source_def,
     ],
 }
 with open(os.path.join(scenes_dir, "CookieRTMPS.json"), "w", encoding="utf-8") as f:
@@ -1581,14 +1625,27 @@ class OBSClient:
             },
         )
 
-    async def refresh_brb_browser(self):
-        await self.call(
-            "PressInputPropertiesButton",
-            {
-                "inputName": "BRB_Browser_Source",
-                "propertyName": "refreshnocache",
-            },
-        )
+    async def refresh_brb_source(self):
+        try:
+            await self.call(
+                "PressInputPropertiesButton",
+                {
+                    "inputName": "BRB_Browser_Source",
+                    "propertyName": "refreshnocache",
+                },
+            )
+        except Exception:
+            pass
+        try:
+            await self.call(
+                "TriggerMediaInputAction",
+                {
+                    "inputName": "BRB_Browser_Source",
+                    "mediaAction": "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_RESTART",
+                },
+            )
+        except Exception:
+            pass
 
 
 async def run_controller():
@@ -1637,7 +1694,7 @@ async def run_controller():
                             f"Switching to '{OBS_SCENE_BRB}' (loop={BRB_VIDEO_LOOP}, timeout={CLOUD_BRB_TIMEOUT}s).",
                             flush=True,
                         )
-                        await obs.refresh_brb_browser()
+                        await obs.refresh_brb_source()
                         await obs.set_scene(OBS_SCENE_BRB)
                         state = "BRB"
                         brb_started_at = time.monotonic()
@@ -1695,6 +1752,10 @@ CONTROLLER_PY_EOF
     cat << 'ENTRYPOINT_EOF' > "$BRIDGE_DIR/entrypoint.sh"
 #!/bin/bash
 set -e
+
+export XDG_RUNTIME_DIR=/tmp/runtime-root
+mkdir -p "$XDG_RUNTIME_DIR"
+chmod 700 "$XDG_RUNTIME_DIR"
 
 python3 /opt/obs-bridge/setup_obs.py
 
@@ -1830,7 +1891,7 @@ run_full_integration_tests() {
         fi
 
         if python3 -c "
-import os, socket
+import socket
 s = socket.create_connection(('127.0.0.1', int('$PORT_RTMP')), 2)
 c1 = b'\x03' + b'\x00' * 1536
 s.sendall(c1)
