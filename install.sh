@@ -9,6 +9,7 @@ cd "$SCRIPT_DIR" || exit 1
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 # Default values
@@ -57,13 +58,14 @@ V_RTMP1_KEY=""
 OBS_KEY=""
 APP_NAME="live"
 ACCEPTED_IP=""
+WHITELIST_MODE="auto"
 SERVER_DOMAIN=""
 CHUNK_SIZE="8192"
 
 # Host Port Settings
 PORT_RTMP="1935"
 
-# NOALBS Settings (Disabled by default)
+# NOALBS & Server-Side BRB Protection Settings (Disabled by default)
 NOALBS_ENABLED="false"
 FALLBACK_MODE="video"
 OBS_WS_HOST="127.0.0.1"
@@ -76,6 +78,10 @@ RESTORE_BITRATE="1500"
 CLOUD_BRB="false"
 BRB_VIDEO_URL=""
 CLOUD_BRB_TIMEOUT="300"
+
+# Latest detected plugin versions (populated without apt-get)
+LATEST_NOALBS_VERSION=""
+LATEST_NGINX_RTMP_VERSION=""
 
 CONFIG_FILE="$SCRIPT_DIR/rtmp_config.env"
 PERSIST_USER_DIR="$HOME/.cookie-rtmps"
@@ -90,10 +96,10 @@ CONFIG_VARS=(
     RTMP1_URL RTMP1_KEY V_YOUTUBE_URL V_YOUTUBE_KEY V_TWITCH_URL V_TWITCH_KEY
     V_KICK_URL V_KICK_KEY V_TIKTOK_URL V_TIKTOK_KEY V_FACEBOOK_URL V_FACEBOOK_KEY
     V_INSTAGRAM_URL V_INSTAGRAM_KEY V_X_URL V_X_KEY V_TROVO_URL V_TROVO_KEY
-    V_RTMP1_URL V_RTMP1_KEY OBS_KEY APP_NAME ACCEPTED_IP SERVER_DOMAIN CHUNK_SIZE
-    NOALBS_ENABLED FALLBACK_MODE OBS_WS_HOST OBS_WS_PORT OBS_WS_PASSWORD
-    OBS_SCENE_LIVE OBS_SCENE_BRB LOW_BITRATE RESTORE_BITRATE CLOUD_BRB
-    BRB_VIDEO_URL CLOUD_BRB_TIMEOUT PORT_RTMP
+    V_RTMP1_URL V_RTMP1_KEY OBS_KEY APP_NAME ACCEPTED_IP WHITELIST_MODE
+    SERVER_DOMAIN CHUNK_SIZE NOALBS_ENABLED FALLBACK_MODE OBS_WS_HOST
+    OBS_WS_PORT OBS_WS_PASSWORD OBS_SCENE_LIVE OBS_SCENE_BRB LOW_BITRATE
+    RESTORE_BITRATE CLOUD_BRB BRB_VIDEO_URL CLOUD_BRB_TIMEOUT PORT_RTMP
 )
 
 get_sudo() {
@@ -104,10 +110,165 @@ get_sudo() {
 
 get_server_ip() {
     if [ -z "$CACHED_SERVER_IP" ]; then
-        CACHED_SERVER_IP=$(curl -4 -s --max-time 2 ifconfig.me 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}')
+        CACHED_SERVER_IP=$(curl -4 -s --max-time 3 ifconfig.me 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}')
         [ -z "$CACHED_SERVER_IP" ] && CACHED_SERVER_IP="<your_server_ip>"
     fi
     echo "$CACHED_SERVER_IP"
+}
+
+mask_to_cidr() {
+    local mask="$1"
+    local bits=0
+    local IFS='.'
+    read -r o1 o2 o3 o4 <<< "$mask"
+    for octet in "$o1" "$o2" "$o3" "$o4"; do
+        case "$octet" in
+            255) bits=$((bits + 8)) ;;
+            254) bits=$((bits + 7)) ;;
+            252) bits=$((bits + 6)) ;;
+            248) bits=$((bits + 5)) ;;
+            240) bits=$((bits + 4)) ;;
+            224) bits=$((bits + 3)) ;;
+            192) bits=$((bits + 2)) ;;
+            128) bits=$((bits + 1)) ;;
+            0)   ;;
+            *)   return 1 ;;
+        esac
+    done
+    echo "$bits"
+}
+
+normalize_ipv4_cidr() {
+    local input="$1"
+    local ip="${input%%/*}"
+    local prefix="${input#*/}"
+
+    [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+    if [ "$ip" == "$prefix" ] || ! [[ "$prefix" =~ ^[0-9]+$ ]] || [ "$prefix" -lt 0 ] || [ "$prefix" -gt 32 ]; then
+        echo "$ip"
+        return 0
+    fi
+    if [ "$prefix" -eq 32 ]; then
+        echo "${ip}/32"
+        return 0
+    fi
+    if [ "$prefix" -eq 0 ]; then
+        return 1
+    fi
+
+    local IFS='.'
+    read -r o1 o2 o3 o4 <<< "$ip"
+    local ip_int=$(( (o1 << 24) + (o2 << 16) + (o3 << 8) + o4 ))
+    local mask_int=$(( (0xFFFFFFFF << (32 - prefix)) & 0xFFFFFFFF ))
+    local net_int=$(( ip_int & mask_int ))
+    printf "%d.%d.%d.%d/%d\n" \
+        $(( (net_int >> 24) & 255 )) \
+        $(( (net_int >> 16) & 255 )) \
+        $(( (net_int >> 8) & 255 )) \
+        $(( net_int & 255 )) \
+        "$prefix"
+}
+
+detect_vpn_ip_ranges() {
+    local SUDO
+    SUDO=$(get_sudo)
+    local raw_ranges=()
+
+    # 1. Detect active WireGuard (wg*) and OpenVPN (tun*/tap*) interfaces
+    if command -v ip &> /dev/null; then
+        local iface addr route_net norm
+        while read -r iface; do
+            [ -z "$iface" ] && continue
+            while read -r route_net; do
+                if [[ "$route_net" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]]; then
+                    norm=$(normalize_ipv4_cidr "$route_net" 2>/dev/null || true)
+                    [ -n "$norm" ] && raw_ranges+=("$norm")
+                fi
+            done < <(ip -4 route show dev "$iface" scope link 2>/dev/null | awk '{print $1}')
+
+            while read -r addr; do
+                norm=$(normalize_ipv4_cidr "$addr" 2>/dev/null || true)
+                [ -n "$norm" ] && raw_ranges+=("$norm")
+            done < <(ip -4 -o addr show dev "$iface" 2>/dev/null | awk '{print $4}')
+        done < <(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | cut -d'@' -f1 | grep -E '^(wg|tun|tap|ovpn|utun)[0-9a-zA-Z_-]*$' || true)
+    fi
+
+    # 2. Detect WireGuard subnets from /etc/wireguard/*.conf
+    local wg_conf wg_line wg_item norm
+    if [ -d "/etc/wireguard" ]; then
+        while IFS= read -r wg_conf; do
+            [ -z "$wg_conf" ] && continue
+            while IFS= read -r wg_line; do
+                wg_line=$(echo "$wg_line" | sed -E 's/^[[:space:]]*Address[[:space:]]*=[[:space:]]*//I' | tr -d ' ')
+                IFS=',' read -ra wg_parts <<< "$wg_line"
+                for wg_item in "${wg_parts[@]}"; do
+                    if [[ "$wg_item" == *.* ]]; then
+                        norm=$(normalize_ipv4_cidr "$wg_item" 2>/dev/null || true)
+                        [ -n "$norm" ] && raw_ranges+=("$norm")
+                    fi
+                done
+            done < <($SUDO grep -iE '^[[:space:]]*Address[[:space:]]*=' "$wg_conf" 2>/dev/null || true)
+        done < <($SUDO find /etc/wireguard -maxdepth 2 -type f -name "*.conf" 2>/dev/null || true)
+    fi
+
+    # 3. Detect OpenVPN subnets from /etc/openvpn/*.conf and /etc/openvpn/server/*.conf
+    local ovpn_conf ovpn_net ovpn_mask ovpn_cidr norm
+    if [ -d "/etc/openvpn" ]; then
+        while IFS= read -r ovpn_conf; do
+            [ -z "$ovpn_conf" ] && continue
+            while read -r _ ovpn_net ovpn_mask _; do
+                ovpn_cidr=$(mask_to_cidr "$ovpn_mask" 2>/dev/null || true)
+                if [ -n "$ovpn_cidr" ]; then
+                    norm=$(normalize_ipv4_cidr "${ovpn_net}/${ovpn_cidr}" 2>/dev/null || true)
+                    [ -n "$norm" ] && raw_ranges+=("$norm")
+                fi
+            done < <($SUDO grep -iE '^[[:space:]]*server[[:space:]]+[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+[[:space:]]+[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' "$ovpn_conf" 2>/dev/null || true)
+        done < <($SUDO find /etc/openvpn -maxdepth 3 -type f -name "*.conf" 2>/dev/null || true)
+    fi
+
+    # 4. Always include standard private WireGuard & OpenVPN default subnets
+    raw_ranges+=(
+        "10.8.0.0/24"
+        "10.66.66.0/24"
+        "10.7.0.0/24"
+        "10.13.13.0/24"
+    )
+
+    # Deduplicate while preserving order
+    local seen="" item
+    for item in "${raw_ranges[@]}"; do
+        [ -z "$item" ] && continue
+        [ "$item" == "0.0.0.0/0" ] && continue
+        if [[ ",$seen," != *",$item,"* ]]; then
+            seen="${seen:+${seen},}${item}"
+        fi
+    done
+    echo "$seen"
+}
+
+build_default_whitelist() {
+    local srv_ip vpn_ranges combined="" item
+    srv_ip=$(curl -4 -s --max-time 3 ifconfig.me 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}' || true)
+    if [[ "$srv_ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+        CACHED_SERVER_IP="$srv_ip"
+        combined="$srv_ip"
+    fi
+
+    # Always allow localhost for internal relays, Stunnel, and Server-Side Cloud BRB FFmpeg
+    if [[ ",$combined," != *",127.0.0.1,"* ]]; then
+        combined="${combined:+${combined},}127.0.0.1"
+    fi
+
+    vpn_ranges=$(detect_vpn_ip_ranges)
+    IFS=',' read -ra vpn_list <<< "$vpn_ranges"
+    for item in "${vpn_list[@]}"; do
+        [ -z "$item" ] && continue
+        if [[ ",$combined," != *",$item,"* ]]; then
+            combined="${combined:+${combined},}${item}"
+        fi
+    done
+
+    echo "$combined"
 }
 
 write_config_to_path() {
@@ -182,6 +343,11 @@ sync_and_preserve_installation() {
         found_config="$CONFIG_FILE"
     fi
 
+    # Default to Server IP + WireGuard/OpenVPN ranges on fresh/auto setups
+    if [ "$WHITELIST_MODE" == "auto" ] && [ -z "$ACCEPTED_IP" ]; then
+        ACCEPTED_IP=$(build_default_whitelist)
+    fi
+
     local old_install_dirs=(
         "$(dirname "$SCRIPT_DIR")"
         "$HOME/cookie-rtmps"
@@ -233,6 +399,37 @@ save_config() {
         $SUDO cp -f "$CONFIG_FILE" "$PERSIST_SYS_CONFIG" 2>/dev/null || true
     fi
     echo -e "${GREEN}Configuration saved to $CONFIG_FILE${NC}"
+}
+
+check_latest_plugins() {
+    echo -e "${CYAN}Checking latest versions of CookieRTMPS plugins (skipping OS apt-get updates/upgrades)...${NC}"
+
+    # Check latest NOALBS release tag
+    local noalbs_tag
+    noalbs_tag=$(curl -fsSL --max-time 5 "https://api.github.com/repos/NOALBS/nginx-obs-automatic-low-bitrate-switching/releases/latest" 2>/dev/null \
+        | grep -m 1 '"tag_name"' | sed -E 's/.*"tag_name":[[:space:]]*"([^"]+)".*/\1/' || true)
+    if [ -n "$noalbs_tag" ]; then
+        LATEST_NOALBS_VERSION="$noalbs_tag"
+        echo -e "  ${GREEN}NOALBS latest release:${NC} $LATEST_NOALBS_VERSION"
+    else
+        echo -e "  ${YELLOW}NOALBS latest release:${NC} Could not query GitHub (using Dockerfile default)"
+    fi
+
+    # Check latest nginx-rtmp-module release/tag
+    local rtmp_tag
+    rtmp_tag=$(curl -fsSL --max-time 5 "https://api.github.com/repos/arut/nginx-rtmp-module/tags?per_page=1" 2>/dev/null \
+        | grep -m 1 '"name"' | sed -E 's/.*"name":[[:space:]]*"([^"]+)".*/\1/' || true)
+    if [ -n "$rtmp_tag" ]; then
+        LATEST_NGINX_RTMP_VERSION="$rtmp_tag"
+        echo -e "  ${GREEN}nginx-rtmp-module latest tag:${NC} $LATEST_NGINX_RTMP_VERSION"
+    else
+        echo -e "  ${YELLOW}nginx-rtmp-module latest tag:${NC} Could not query GitHub (using Dockerfile default)"
+    fi
+
+    # Warn if Dockerfile contains unnecessary apt-get upgrade calls
+    if [ -f "$SCRIPT_DIR/Dockerfile" ] && grep -qE 'apt-get[[:space:]]+(dist-|full-)?upgrade' "$SCRIPT_DIR/Dockerfile"; then
+        echo -e "  ${YELLOW}Notice:${NC} Your Dockerfile contains an 'apt-get upgrade' call. Consider removing it since the server handles updates automatically."
+    fi
 }
 
 prompt_for_key() {
@@ -702,34 +899,40 @@ configure_domain() {
 configure_whitelist() {
     while true; do
         clear
+        local AUTO_PREVIEW
+        AUTO_PREVIEW=$(build_default_whitelist)
         echo -e "${GREEN}=== IP Whitelist Configuration ===${NC}"
+        echo -e "Current Mode:        ${CYAN}${WHITELIST_MODE}${NC}"
         echo -e "Current Accepted IP: ${YELLOW}${ACCEPTED_IP:-None (Allow All)}${NC}"
+        echo -e "Auto-Detected Pool:  ${GREEN}${AUTO_PREVIEW}${NC}"
         echo ""
-        echo "1) Server's IP Address (For those who proxy, VPN or Wireguard Into the Server)"
-        echo "2) Manual IP Address"
-        echo "3) Clear IP Address"
+        echo "1) Auto: Server IP + WireGuard / OpenVPN Ranges [Default]"
+        echo "2) Manual IP Address / CIDR (comma-separated allowed)"
+        echo "3) Clear IP Address (Allow All)"
         echo "4) Back to Main Menu"
-        echo -e "Select an option: \c"
+        echo -e "Select an option [1]: \c"
         read -r wl_opt
+        [ -z "$wl_opt" ] && wl_opt="1"
 
         case $wl_opt in
             1)
-                local SERVER_IP_FETCH
-                SERVER_IP_FETCH=$(curl -4 -s --max-time 3 ifconfig.me || echo "")
-                if [ -n "$SERVER_IP_FETCH" ]; then
-                    ACCEPTED_IP="$SERVER_IP_FETCH"
-                    CACHED_SERVER_IP="$SERVER_IP_FETCH"
-                    echo -e "${GREEN}IP Whitelist updated to server IP: $ACCEPTED_IP${NC}"
+                WHITELIST_MODE="auto"
+                ACCEPTED_IP="$AUTO_PREVIEW"
+                if [ -n "$ACCEPTED_IP" ]; then
+                    echo -e "${GREEN}IP Whitelist set to Auto (Server IP + WireGuard/OpenVPN):${NC}"
+                    echo -e "  $ACCEPTED_IP"
                 else
-                    echo -e "${RED}Failed to fetch server IP.${NC}"
+                    echo -e "${RED}Failed to auto-detect server/VPN IP ranges.${NC}"
                 fi
                 save_config
                 sleep 1
                 ;;
             2)
-                echo -e "Enter IP address to whitelist: \c"
+                echo -e "Enter IP address or CIDR to whitelist (e.g. 203.0.113.5 or 203.0.113.5,10.8.0.0/24): \c"
                 read -r ip_input
+                ip_input=$(echo "$ip_input" | tr -d ' ')
                 if [ -n "$ip_input" ]; then
+                    WHITELIST_MODE="manual"
                     ACCEPTED_IP="$ip_input"
                     echo -e "${GREEN}IP Whitelist updated to: $ACCEPTED_IP${NC}"
                     save_config
@@ -737,12 +940,13 @@ configure_whitelist() {
                 sleep 1
                 ;;
             3)
+                WHITELIST_MODE="disabled"
                 ACCEPTED_IP=""
                 echo -e "${GREEN}IP Whitelist disabled. All IPs allowed.${NC}"
                 save_config
                 sleep 1
                 ;;
-            4|"") break ;;
+            4) break ;;
             *) echo -e "${RED}Invalid option${NC}"; sleep 1 ;;
         esac
     done
@@ -758,7 +962,7 @@ ensure_brb_video_transcoded() {
     curl -L "$url" -o "${target}.tmp"
     if [ -f "${target}.tmp" ] && [ -s "${target}.tmp" ]; then
         if command -v ffmpeg &> /dev/null; then
-            echo -e "${YELLOW}Transcoding BRB video with FFmpeg to ensure AAC audio and H.264 video compatibility...${NC}"
+            echo -e "${YELLOW}Transcoding BRB video with FFmpeg for RTMP server-side loop playback (H.264 30fps / AAC 48kHz)...${NC}"
             local duration=""
             if command -v ffprobe &> /dev/null; then
                 duration=$(ffprobe -v error -show_entries format=duration -of default=noprintwrappers=1:nokey=1 "${target}.tmp" 2>/dev/null || true)
@@ -769,7 +973,13 @@ ensure_brb_video_transcoded() {
                 [ -n "$dur_str" ] && duration=$(echo "$dur_str" | awk -F: '{ print ($1 * 3600) + ($2 * 60) + $3 }')
             fi
 
-            ffmpeg -y -hide_banner -loglevel warning -i "${target}.tmp" -c:v libx264 -pix_fmt yuv420p -g 60 -c:a aac -ar 48000 -ac 2 -progress pipe:1 "$target" 2>/dev/null | while read -r line; do
+            ffmpeg -y -hide_banner -loglevel warning -i "${target}.tmp" \
+                -c:v libx264 -preset veryfast -profile:v main -pix_fmt yuv420p \
+                -r 30 -g 60 -keyint_min 60 -sc_threshold 0 \
+                -b:v 2500k -maxrate 2500k -bufsize 5000k \
+                -c:a aac -b:a 128k -ar 48000 -ac 2 \
+                -movflags +faststart \
+                -progress pipe:1 "$target" 2>/dev/null | while read -r line; do
                 if [[ "$line" == out_time_us=* ]]; then
                     local us="${line#*=}"
                     if [[ "$us" =~ ^[0-9]+$ ]] && [ -n "$duration" ]; then
@@ -789,13 +999,14 @@ ensure_brb_video_transcoded() {
             echo ""
 
             if [ -f "$target" ] && [ -s "$target" ]; then
-                echo -e "${GREEN}BRB video successfully downloaded and transcoded.${NC}"
+                echo -e "${GREEN}BRB video successfully downloaded and transcoded for zero-reencode RTMP looping.${NC}"
                 rm -f "${target}.tmp"
             else
                 echo -e "${YELLOW}FFmpeg transcode warning. Using downloaded file directly.${NC}"
                 mv "${target}.tmp" "$target"
             fi
         else
+            echo -e "${YELLOW}FFmpeg not found on host; using downloaded MP4 directly (container FFmpeg will handle playback).${NC}"
             mv "${target}.tmp" "$target"
         fi
     else
@@ -807,11 +1018,12 @@ ensure_brb_video_transcoded() {
 configure_noalbs() {
     while true; do
         clear
-        echo -e "${GREEN}=== NOALBS Scene Switcher Configuration ===${NC}"
-        echo -e "Status: $([ "$NOALBS_ENABLED" == "true" ] && echo -e "${GREEN}ENABLED${NC}" || echo -e "${RED}DISABLED${NC}")"
+        echo -e "${GREEN}=== NOALBS & Server-Side BRB Protection ===${NC}"
+        echo -e "Status:        $([ "$NOALBS_ENABLED" == "true" ] && echo -e "${GREEN}ENABLED${NC}" || echo -e "${RED}DISABLED${NC}")"
+        echo -e "Fallback Mode: ${CYAN}${FALLBACK_MODE:-video}${NC} ($([ "$FALLBACK_MODE" == "obs" ] && echo "OBS WebSocket Scene Switch" || echo "Server-Side MP4 Loop / Cloud BRB"))"
         echo ""
         echo "1) Toggle Enabled (Currently: $NOALBS_ENABLED)"
-        echo "2) Primary Fallback Mode (Current: ${FALLBACK_MODE:-video} [video = MP4, obs = OBS Scene Switch])"
+        echo "2) Primary Fallback Mode (Current: ${FALLBACK_MODE:-video} [video = Server-Side MP4, obs = OBS Scene Switch])"
         echo "3) OBS WebSocket Host (Current: $OBS_WS_HOST)"
         echo "4) OBS WebSocket Port (Current: $OBS_WS_PORT)"
         echo "5) OBS WebSocket Password (Current: ${OBS_WS_PASSWORD:-(None)})"
@@ -819,18 +1031,36 @@ configure_noalbs() {
         echo "7) BRB Scene Name (Current: $OBS_SCENE_BRB)"
         echo "8) Low Bitrate Threshold (Current: $LOW_BITRATE kbps)"
         echo "9) Restore Bitrate Threshold (Current: $RESTORE_BITRATE kbps)"
-        echo "10) Toggle Cloud BRB (Currently: $CLOUD_BRB)"
-        echo "11) Configure BRB Video URL (Current: ${BRB_VIDEO_URL:-(None)})"
+        echo "10) Toggle Cloud BRB Server-Side MP4 (Currently: $CLOUD_BRB)"
+        echo "11) Configure BRB Video URL (Current: ${BRB_VIDEO_URL:-(Default)})"
         echo "12) Disconnection Protection Duration (Current: ${CLOUD_BRB_TIMEOUT} seconds)"
         echo "13) Back to Main Menu"
         echo -e "Select an option: \c"
         read -r noalbs_opt
 
         case $noalbs_opt in
-            1) [ "$NOALBS_ENABLED" == "true" ] && NOALBS_ENABLED="false" || NOALBS_ENABLED="true"; save_config ;;
+            1)
+                if [ "$NOALBS_ENABLED" == "true" ]; then
+                    NOALBS_ENABLED="false"
+                else
+                    NOALBS_ENABLED="true"
+                    if [ "$FALLBACK_MODE" == "video" ]; then
+                        CLOUD_BRB="true"
+                        echo -e "${GREEN}NOALBS enabled with Server-Side MP4 (Cloud BRB automatically enabled).${NC}"
+                        sleep 1
+                    fi
+                fi
+                save_config
+                ;;
             2)
-                [ "$FALLBACK_MODE" == "obs" ] && FALLBACK_MODE="video" || FALLBACK_MODE="obs"
-                echo -e "${GREEN}Primary Fallback Mode switched to: $FALLBACK_MODE${NC}"
+                if [ "$FALLBACK_MODE" == "obs" ]; then
+                    FALLBACK_MODE="video"
+                    CLOUD_BRB="true"
+                    echo -e "${GREEN}Primary Fallback Mode switched to: video (Server-Side MP4 / Cloud BRB enabled)${NC}"
+                else
+                    FALLBACK_MODE="obs"
+                    echo -e "${GREEN}Primary Fallback Mode switched to: obs (OBS WebSocket Scene Switch)${NC}"
+                fi
                 save_config
                 sleep 1
                 ;;
@@ -854,7 +1084,7 @@ configure_noalbs() {
                 elif [ -n "$input" ]; then
                     BRB_VIDEO_URL="$input"
                     save_config
-                    if [ "$NOALBS_ENABLED" == "true" ] && [ "$CLOUD_BRB" == "true" ]; then
+                    if [ "$NOALBS_ENABLED" == "true" ] && { [ "$CLOUD_BRB" == "true" ] || [ "$FALLBACK_MODE" == "video" ]; }; then
                         ensure_brb_video_transcoded "$BRB_VIDEO_URL"
                     fi
                     sleep 1
@@ -928,7 +1158,7 @@ install_docker() {
         rm -f get-docker.sh
         echo -e "${GREEN}Docker installed successfully.${NC}"
     else
-        echo -e "${GREEN}Docker is already installed.${NC}"
+        echo -e "${GREEN}Docker is already installed ($(docker --version 2>/dev/null)).${NC}"
     fi
     sleep 1
 }
@@ -965,7 +1195,7 @@ cleanup_old_rtmp_files() {
         $SUDO rm -rf "$PERSIST_SYS_DIR" 2>/dev/null || true
     elif [ -d "./data" ]; then
         rm -f ./data/*.tmp ./data/*.log ./data/*.pid ./data/*.sock ./data/*.flv ./data/*.ts ./data/*.m3u8 2>/dev/null || true
-        if [ "$NOALBS_ENABLED" != "true" ] || [ "$CLOUD_BRB" != "true" ]; then
+        if [ "$NOALBS_ENABLED" != "true" ] || { [ "$CLOUD_BRB" != "true" ] && [ "$FALLBACK_MODE" != "video" ]; }; then
             rm -f ./data/brb_video.mp4 ./data/brb_video.mp4.tmp 2>/dev/null || true
         fi
     fi
@@ -988,6 +1218,19 @@ build_and_run() {
         echo -e "${RED}Docker is not installed! Please run 'Install Docker' first.${NC}"
         sleep 2
         return
+    fi
+
+    # Refresh auto whitelist (Server IP + WireGuard/OpenVPN ranges) before container launch
+    if [ "$WHITELIST_MODE" == "auto" ]; then
+        ACCEPTED_IP=$(build_default_whitelist)
+        save_config
+        echo -e "${GREEN}Auto IP Whitelist active:${NC} $ACCEPTED_IP"
+    fi
+
+    # Keep Cloud BRB synced when NOALBS is enabled in server-side video mode
+    if [ "$NOALBS_ENABLED" == "true" ] && [ "$FALLBACK_MODE" == "video" ] && [ "$CLOUD_BRB" != "true" ]; then
+        CLOUD_BRB="true"
+        save_config
     fi
 
     echo -e "${YELLOW}Checking and removing old containers, port conflicts, and stale files...${NC}"
@@ -1068,7 +1311,7 @@ build_and_run() {
     fi
 
     mkdir -p ./data
-    if [ "$NOALBS_ENABLED" == "true" ] && [ "$CLOUD_BRB" == "true" ]; then
+    if [ "$NOALBS_ENABLED" == "true" ] && { [ "$CLOUD_BRB" == "true" ] || [ "$FALLBACK_MODE" == "video" ]; }; then
         if [ -f "./data/brb_video.mp4" ] && [ -s "./data/brb_video.mp4" ]; then
             echo -e "${GREEN}Existing BRB video found at ./data/brb_video.mp4. Preserving video source.${NC}"
         else
@@ -1083,8 +1326,21 @@ build_and_run() {
         rm -f ./data/brb_video.mp4 ./data/brb_video.mp4.tmp 2>/dev/null || true
     fi
 
+    # Check latest plugin versions only (no apt-get update/upgrade)
+    check_latest_plugins
+
+    local BUILD_ARGS=()
+    if [ -f "$SCRIPT_DIR/Dockerfile" ]; then
+        if [ -n "$LATEST_NOALBS_VERSION" ] && grep -qE '^ARG[[:space:]]+NOALBS_VERSION' "$SCRIPT_DIR/Dockerfile"; then
+            BUILD_ARGS+=(--build-arg "NOALBS_VERSION=$LATEST_NOALBS_VERSION")
+        fi
+        if [ -n "$LATEST_NGINX_RTMP_VERSION" ] && grep -qE '^ARG[[:space:]]+NGINX_RTMP_VERSION' "$SCRIPT_DIR/Dockerfile"; then
+            BUILD_ARGS+=(--build-arg "NGINX_RTMP_VERSION=$LATEST_NGINX_RTMP_VERSION")
+        fi
+    fi
+
     echo -e "${GREEN}Building Docker Image...${NC}"
-    DOCKER_BUILDKIT=1 docker build -t cookie-rtmps .
+    DOCKER_BUILDKIT=1 docker build "${BUILD_ARGS[@]}" -t cookie-rtmps .
 
     echo -e "${GREEN}Starting container...${NC}"
     docker rm -v -f cookie-rtmps 2>/dev/null || true
@@ -1117,6 +1373,7 @@ build_and_run() {
         -e "OBS_SCENE_LIVE=$OBS_SCENE_LIVE" -e "OBS_SCENE_BRB=$OBS_SCENE_BRB"
         -e "LOW_BITRATE=$LOW_BITRATE" -e "RESTORE_BITRATE=$RESTORE_BITRATE"
         -e "CLOUD_BRB=$CLOUD_BRB" -e "CLOUD_BRB_TIMEOUT=$CLOUD_BRB_TIMEOUT"
+        -e "BRB_VIDEO_URL=$BRB_VIDEO_URL" -e "BRB_VIDEO_PATH=/app/data/brb_video.mp4"
     )
 
     docker run -d --name cookie-rtmps \
@@ -1292,15 +1549,16 @@ while true; do
     echo -e "${YELLOW}Quick Reference:${NC}"
     echo -e "  RTMP Ingest:     rtmp://${DISPLAY_HOST}:${PORT_RTMP}/${APP_NAME}"
     echo -e "  Vertical Ingest: rtmp://${DISPLAY_HOST}:${PORT_RTMP}/vertical"
+    echo -e "  IP Whitelist:    ${WHITELIST_MODE} (${ACCEPTED_IP:-Allow All})"
     echo "-------------------------------------"
     echo "1) Install Docker (if not installed)"
     echo "2) Configure Stream Keys (Horizontal)"
     echo "3) Configure Stream Keys (Vertical)"
     echo "4) Configure OBS Setup & Security Key"
-    echo "5) Configure IP Whitelist (Optional)"
+    echo "5) Configure IP Whitelist (Auto VPN/WireGuard + Server IP)"
     echo "6) Configure Domain / Reverse Proxy (Optional)"
     echo "7) Configure Optimizations (Chunk Size)"
-    echo "8) Configure NOALBS Scene Switcher"
+    echo "8) Configure NOALBS & Server-Side BRB Protection"
     echo "9) Build & Start Server"
     echo "10) Run Integration Tests"
     echo "11) Stop Server & Uninstall"
