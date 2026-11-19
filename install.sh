@@ -1115,7 +1115,7 @@ import urllib.parse
 PORT_RTMP = os.environ.get("PORT_RTMP", "1935")
 APP_NAME = os.environ.get("APP_NAME", "live")
 OBS_KEY = os.environ.get("OBS_KEY", "")
-OBS_WS_PORT = os.environ.get("OBS_WS_PORT", "4455")
+OBS_WS_PORT = int(os.environ.get("OBS_WS_PORT", "4455"))
 OBS_WS_PASSWORD = os.environ.get("OBS_WS_PASSWORD", "")
 OBS_SCENE_LIVE = os.environ.get("OBS_SCENE_LIVE", "main")
 OBS_SCENE_BRB = os.environ.get("OBS_SCENE_BRB", "brb")
@@ -1130,8 +1130,23 @@ RELAY_HOST = os.environ.get("RELAY_HOST", "127.0.0.1")
 obs_root = "/root/.config/obs-studio"
 profile_dir = os.path.join(obs_root, "basic", "profiles", "CookieRTMPS")
 scenes_dir = os.path.join(obs_root, "basic", "scenes")
+ws_plugin_dir = os.path.join(obs_root, "plugin_config", "obs-websocket")
 os.makedirs(profile_dir, exist_ok=True)
 os.makedirs(scenes_dir, exist_ok=True)
+os.makedirs(ws_plugin_dir, exist_ok=True)
+
+# 0. OBS WebSocket v5 plugin config (OBS 28+ / 30 reads plugin_config/obs-websocket/config.json)
+ws_config = {
+    "alerts_enabled": False,
+    "auth_required": bool(OBS_WS_PASSWORD),
+    "first_load": False,
+    "media_inputs_show_all": True,
+    "password": OBS_WS_PASSWORD,
+    "server_enabled": True,
+    "server_port": OBS_WS_PORT,
+}
+with open(os.path.join(ws_plugin_dir, "config.json"), "w", encoding="utf-8") as f:
+    json.dump(ws_config, f, indent=2)
 
 # 1. Global / User INI (disables first-run wizards and configures obs-websocket v5)
 for ini_name in ("global.ini", "user.ini"):
@@ -1695,7 +1710,6 @@ async def run_controller():
                     brb_started_at = None
 
             elif state == "LIVE":
-                # Nginx-RTMP bw_in averages over a 10s window; ignore low kbps during initial 10s ramp-up unless publisher disconnects
                 in_warmup = (time.monotonic() - (live_started_at or 0.0)) < 10.0
                 if (not publishing) or (not in_warmup and kbps < LOW_BITRATE):
                     low_streak += 1
@@ -1791,9 +1805,9 @@ pactl set-default-sink obs_virtual_sink >/dev/null 2>&1 || true
 # Launch Lightweight Headless OBS with preconfigured 'main' & 'brb' scenes
 obs --profile CookieRTMPS --collection CookieRTMPS --disable-shutdown-check >/tmp/obs.log 2>&1 &
 
-# Wait up to 15s for OBS WebSocket to bind before starting controller
+# Wait up to 20s for OBS WebSocket to bind before starting controller
 OBS_WS_PORT_VAL="${OBS_WS_PORT:-4455}"
-for _ in $(seq 1 30); do
+for _ in $(seq 1 40); do
     if python3 -c "import socket; s=socket.create_connection(('127.0.0.1', int('$OBS_WS_PORT_VAL')), 0.5); s.close()" 2>/dev/null; then
         break
     fi
@@ -2077,7 +2091,9 @@ PY_OBS_TEST
         if echo "$OBS_TEST_OUTPUT" | grep -q "OK:OBS_WS_AUTH"; then
             record_pass "OBS WebSocket v5 connected and authenticated on port ${OBS_WS_PORT}."
         else
-            record_fail "OBS WebSocket v5 connection failed: ${OBS_TEST_OUTPUT}"
+            local OBS_LOG_TAIL
+            OBS_LOG_TAIL=$(docker exec cookie-rtmps-obs tail -n 8 /tmp/obs.log 2>/dev/null | tr '\n' ' ')
+            record_fail "OBS WebSocket v5 connection failed: ${OBS_TEST_OUTPUT} | obs.log: ${OBS_LOG_TAIL}"
         fi
 
         if echo "$OBS_TEST_OUTPUT" | grep -q "OK:SCENES_VERIFIED"; then
@@ -2474,7 +2490,7 @@ if p.exists():
         fi
 
         echo -e "${YELLOW}Waiting for Lightweight OBS & WebSocket server to initialize...${NC}"
-        for _ in $(seq 1 30); do
+        for _ in $(seq 1 40); do
             if python3 -c "import socket; s=socket.create_connection(('127.0.0.1', int('$PORT_RTMP')), 0.5); s.close()" 2>/dev/null \
                && python3 -c "import socket; s=socket.create_connection(('127.0.0.1', int('$OBS_WS_PORT')), 0.5); s.close()" 2>/dev/null; then
                 break
