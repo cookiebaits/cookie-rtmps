@@ -74,7 +74,7 @@ OBS_WS_PASSWORD=""
 OBS_SCENE_LIVE="main"
 OBS_SCENE_BRB="brb"
 LOW_BITRATE="1000"
-RESTORE_BITRATE="1500"
+RESTORE_BITRATE="1000"
 CLOUD_BRB="true"
 BRB_VIDEO_URL="https://filedn.com/lfh40bKbFfD5um9HDFNrJFR/brb.mp4"
 BRB_VIDEO_LOOP="true"
@@ -189,6 +189,8 @@ sync_and_preserve_installation() {
     # Normalize defaults if missing from older config files
     [ -z "$OBS_SCENE_LIVE" ] && OBS_SCENE_LIVE="main"
     [ -z "$OBS_SCENE_BRB" ] && OBS_SCENE_BRB="brb"
+    [ -z "$LOW_BITRATE" ] && LOW_BITRATE="1000"
+    [ -z "$RESTORE_BITRATE" ] && RESTORE_BITRATE="$LOW_BITRATE"
     [ -z "$BRB_VIDEO_URL" ] && BRB_VIDEO_URL="https://filedn.com/lfh40bKbFfD5um9HDFNrJFR/brb.mp4"
     [ -z "$BRB_VIDEO_LOOP" ] && BRB_VIDEO_LOOP="true"
     [ -z "$CLOUD_BRB_TIMEOUT" ] && CLOUD_BRB_TIMEOUT="300"
@@ -885,14 +887,14 @@ configure_noalbs() {
         clear
         echo -e "${GREEN}=== Disconnection Protection & Lightweight OBS (NOALBS) ===${NC}"
         echo -e "Status: $([ "$NOALBS_ENABLED" == "true" ] && echo -e "${GREEN}ENABLED (Lightweight Headless OBS Active)${NC}" || echo -e "${RED}DISABLED${NC}")"
-        echo -e "${CYAN}Architecture: Ingest RTMP -> Headless OBS ['${OBS_SCENE_LIVE}' / '${OBS_SCENE_BRB}'] -> CookieRTMPS Relay${NC}"
+        echo -e "${CYAN}Flow: Ingest RTMP/RTMPS -> Headless OBS ['${OBS_SCENE_LIVE}' <-> '${OBS_SCENE_BRB}'] -> CookieRTMPS Relay${NC}"
         echo ""
         echo "1) Toggle Disconnection Protection (Currently: $NOALBS_ENABLED)"
         echo "2) BRB Video MP4 URL [OBS Browser Source] (Current: ${BRB_VIDEO_URL:-(None)})"
         echo "3) Loop BRB Video While Disconnected (Currently: $BRB_VIDEO_LOOP)"
         echo "4) Disconnect Stream Timeout After BRB Starts (Current: ${CLOUD_BRB_TIMEOUT} seconds)"
-        echo "5) Low Bitrate Threshold -> Switch to '${OBS_SCENE_BRB}' (Current: $LOW_BITRATE kbps)"
-        echo "6) Restore Bitrate Threshold -> Switch to '${OBS_SCENE_LIVE}' (Current: $RESTORE_BITRATE kbps)"
+        echo "5) Low Bitrate Threshold -> Switch to '${OBS_SCENE_BRB}' (Current: <= $LOW_BITRATE kbps)"
+        echo "6) Restore Bitrate Threshold -> Switch to '${OBS_SCENE_LIVE}' (Current: > $RESTORE_BITRATE kbps)"
         echo "7) Main/Live Scene Name (Current: $OBS_SCENE_LIVE)"
         echo "8) BRB Scene Name (Current: $OBS_SCENE_BRB)"
         echo "9) Lightweight OBS Output Bitrate (Current: ${OBS_BRIDGE_BITRATE} kbps)"
@@ -925,12 +927,12 @@ configure_noalbs() {
                 elif [ "$input" == "default" ] || [ "$input" == "DEFAULT" ]; then
                     BRB_VIDEO_URL="https://filedn.com/lfh40bKbFfD5um9HDFNrJFR/brb.mp4"
                     save_config
-                    echo -e "${GREEN}BRB Video URL set to default MP4 (direct browser source, no transcoding).${NC}"
+                    echo -e "${GREEN}BRB Video URL set to default MP4 (direct source, no transcoding).${NC}"
                     sleep 1
                 elif [ -n "$input" ]; then
                     BRB_VIDEO_URL="$input"
                     save_config
-                    echo -e "${GREEN}BRB Video URL updated (direct browser source, no transcoding).${NC}"
+                    echo -e "${GREEN}BRB Video URL updated (direct source, no transcoding).${NC}"
                     sleep 1
                 fi
                 ;;
@@ -941,7 +943,7 @@ configure_noalbs() {
                 sleep 1
                 ;;
             4)
-                echo -e "Enter seconds to loop BRB video before disconnecting stream (Default: 300):"
+                echo -e "Enter seconds to loop BRB video before going offline (Default: 300):"
                 read -r input
                 if [[ "$input" =~ ^[0-9]+$ ]] && [ "$input" -gt 0 ]; then
                     CLOUD_BRB_TIMEOUT="$input"
@@ -954,15 +956,18 @@ configure_noalbs() {
                 fi
                 ;;
             5)
-                echo -e "Enter Low Bitrate Threshold in kbps (switches to '${OBS_SCENE_BRB}' below this, e.g. 1000):"
+                echo -e "Enter Low Bitrate Threshold in kbps (switches to '${OBS_SCENE_BRB}' at or below this, default 1000):"
                 read -r input
                 if [[ "$input" =~ ^[0-9]+$ ]]; then
                     LOW_BITRATE="$input"
+                    if [ "$RESTORE_BITRATE" -lt "$LOW_BITRATE" ]; then
+                        RESTORE_BITRATE="$LOW_BITRATE"
+                    fi
                     save_config
                 fi
                 ;;
             6)
-                echo -e "Enter Restore Bitrate Threshold in kbps (switches back to '${OBS_SCENE_LIVE}' above this, e.g. 1500):"
+                echo -e "Enter Restore Bitrate Threshold in kbps (switches back to '${OBS_SCENE_LIVE}' above this, default 1000):"
                 read -r input
                 if [[ "$input" =~ ^[0-9]+$ ]]; then
                     RESTORE_BITRATE="$input"
@@ -1045,8 +1050,8 @@ RUN printf 'Acquire::ForceIPv4 "true";\nAcquire::http::Timeout "15";\nAcquire::R
     && find /usr/lib -name "obs-websocket.so" | grep -q .
 
 WORKDIR /opt/obs-bridge
-COPY setup_obs.py noalbs_controller.py brb.html entrypoint.sh /opt/obs-bridge/
-RUN chmod +x /opt/obs-bridge/entrypoint.sh /opt/obs-bridge/setup_obs.py /opt/obs-bridge/noalbs_controller.py
+COPY setup_obs.py noalbs_controller.py test_obs_ws.py brb.html entrypoint.sh /opt/obs-bridge/
+RUN chmod +x /opt/obs-bridge/entrypoint.sh /opt/obs-bridge/setup_obs.py /opt/obs-bridge/noalbs_controller.py /opt/obs-bridge/test_obs_ws.py
 
 EXPOSE 1935
 ENTRYPOINT ["/opt/obs-bridge/entrypoint.sh"]
@@ -1135,25 +1140,28 @@ os.makedirs(profile_dir, exist_ok=True)
 os.makedirs(scenes_dir, exist_ok=True)
 os.makedirs(ws_plugin_dir, exist_ok=True)
 
-# 0. OBS WebSocket v5 plugin config (OBS 28+ / 30 reads plugin_config/obs-websocket/config.json)
+# 0. OBS WebSocket v5 plugin config (OBS 28+ / 30 uses server_password + server_enabled)
 ws_config = {
     "alerts_enabled": False,
     "auth_required": bool(OBS_WS_PASSWORD),
     "first_load": False,
-    "media_inputs_show_all": True,
-    "password": OBS_WS_PASSWORD,
     "server_enabled": True,
+    "server_password": OBS_WS_PASSWORD,
     "server_port": OBS_WS_PORT,
 }
 with open(os.path.join(ws_plugin_dir, "config.json"), "w", encoding="utf-8") as f:
     json.dump(ws_config, f, indent=2)
 
-# 1. Global / User INI (disables first-run wizards and configures obs-websocket v5)
+# 1. Global / User INI (FirstRun=true suppresses the Auto-Configuration Wizard modal!)
 for ini_name in ("global.ini", "user.ini"):
     cfg = configparser.ConfigParser()
     cfg.optionxform = str
     cfg["General"] = {
-        "FirstRun": "false",
+        "FirstRun": "true",
+        "Pre19Defaults": "false",
+        "Pre21Defaults": "false",
+        "Pre23Defaults": "false",
+        "Pre24.1Defaults": "false",
         "EnableAutoUpdates": "false",
         "ConfirmOnExit": "false",
     }
@@ -1267,6 +1275,8 @@ if has_obs_browser:
         "private_settings": {},
     }
 else:
+    # is_local_file=True with local_file=HTTPS_URL lets libavformat stream the remote MP4 directly
+    # without downloading/transcoding while honoring OBS's native seamless looping parameter.
     brb_source_def = {
         "prev_ver": 503316480,
         "name": "BRB_Browser_Source",
@@ -1274,14 +1284,12 @@ else:
         "id": "ffmpeg_source",
         "versioned_id": "ffmpeg_source",
         "settings": {
-            "is_local_file": False,
-            "input": BRB_VIDEO_URL,
+            "is_local_file": True,
+            "local_file": BRB_VIDEO_URL,
             "looping": should_loop,
             "restart_on_activate": True,
             "clear_on_media_end": False,
             "close_when_inactive": False,
-            "buffering_mb": 2,
-            "reconnect_delay_sec": 2,
             "hw_decode": False,
         },
         "mixers": 255,
@@ -1449,6 +1457,7 @@ if ip_entries:
 else:
     allow_rules += "            allow publish all;\n"
 
+escaped_obs_key = OBS_KEY.replace("\\", "\\\\").replace('"', '\\"')
 on_publish_directive = ""
 if OBS_KEY:
     on_publish_directive = (
@@ -1501,7 +1510,7 @@ http {{
         }}
 
         location /auth {{
-            if ($arg_name = "{OBS_KEY}") {{
+            if ($arg_name = "{escaped_obs_key}") {{
                 return 200 "OK";
             }}
             return 403 "Forbidden";
@@ -1521,6 +1530,7 @@ SETUP_PY_EOF
 #!/usr/bin/env python3
 import asyncio
 import base64
+import collections
 import hashlib
 import json
 import os
@@ -1539,12 +1549,25 @@ OBS_WS_PASSWORD = os.environ.get("OBS_WS_PASSWORD", "")
 OBS_SCENE_LIVE = os.environ.get("OBS_SCENE_LIVE", "main")
 OBS_SCENE_BRB = os.environ.get("OBS_SCENE_BRB", "brb")
 LOW_BITRATE = float(os.environ.get("LOW_BITRATE", "1000"))
-RESTORE_BITRATE = float(os.environ.get("RESTORE_BITRATE", "1500"))
+RESTORE_BITRATE = float(os.environ.get("RESTORE_BITRATE", str(LOW_BITRATE)))
 BRB_VIDEO_LOOP = os.environ.get("BRB_VIDEO_LOOP", "true").lower() == "true"
 CLOUD_BRB_TIMEOUT = int(os.environ.get("CLOUD_BRB_TIMEOUT", "300"))
+WS_CONFIG_PATH = "/root/.config/obs-studio/plugin_config/obs-websocket/config.json"
+
+
+def load_effective_ws_password(configured_password):
+    if configured_password:
+        return configured_password
+    try:
+        with open(WS_CONFIG_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data.get("server_password") or data.get("password") or ""
+    except Exception:
+        return ""
 
 
 def get_ingest_stats():
+    """Poll Nginx-RTMP /stat XML and return (publishing, bw_in_kbps, bytes_in, stream_name)."""
     try:
         with urllib.request.urlopen("http://127.0.0.1:8090/stat", timeout=1.5) as resp:
             xml_data = resp.read()
@@ -1554,18 +1577,20 @@ def get_ingest_stats():
             if name_el is not None and name_el.text == APP_NAME:
                 live = app.find("live")
                 if live is None:
-                    return False, 0.0, ""
+                    return False, 0.0, 0, ""
                 for stream in live.findall("stream"):
                     publishing = stream.find("publishing")
                     if publishing is not None:
                         bw_el = stream.find("bw_in")
+                        bytes_el = stream.find("bytes_in")
                         sname_el = stream.find("name")
                         bw_bps = float(bw_el.text) if (bw_el is not None and bw_el.text) else 0.0
+                        bytes_in = int(bytes_el.text) if (bytes_el is not None and bytes_el.text) else 0
                         sname = sname_el.text.strip() if (sname_el is not None and sname_el.text) else ""
-                        return True, bw_bps / 1000.0, sname
-        return False, 0.0, ""
+                        return True, bw_bps / 1000.0, bytes_in, sname
+        return False, 0.0, 0, ""
     except Exception:
-        return False, 0.0, ""
+        return False, 0.0, 0, ""
 
 
 def drop_ingest_publisher():
@@ -1574,6 +1599,37 @@ def drop_ingest_publisher():
         urllib.request.urlopen(url, timeout=1.5).read()
     except Exception:
         pass
+
+
+class BitrateTracker:
+    """NOALBS-style fast bitrate estimator using 1-second bytes_in deltas (avoids 10s Nginx bw_in lag)."""
+    def __init__(self):
+        self.prev_bytes = None
+        self.prev_ts = None
+        self.samples = collections.deque(maxlen=2)
+
+    def reset(self):
+        self.prev_bytes = None
+        self.prev_ts = None
+        self.samples.clear()
+
+    def update(self, publishing, bw_in_kbps, bytes_in):
+        now = time.monotonic()
+        if not publishing:
+            self.reset()
+            return 0.0
+
+        if self.prev_bytes is None or bytes_in < self.prev_bytes:
+            self.prev_bytes = bytes_in
+            self.prev_ts = now
+            return bw_in_kbps
+
+        dt = max(now - self.prev_ts, 0.1)
+        instant_kbps = ((bytes_in - self.prev_bytes) * 8.0) / (dt * 1000.0)
+        self.prev_bytes = bytes_in
+        self.prev_ts = now
+        self.samples.append(instant_kbps)
+        return sum(self.samples) / len(self.samples)
 
 
 class OBSClient:
@@ -1588,8 +1644,9 @@ class OBSClient:
         hello = json.loads(hello_raw)
         auth_obj = hello.get("d", {}).get("authentication")
         identify_d = {"rpcVersion": 1}
-        if auth_obj and self.password:
-            secret_hash = hashlib.sha256((self.password + auth_obj["salt"]).encode("utf-8")).digest()
+        if auth_obj:
+            pwd = load_effective_ws_password(self.password)
+            secret_hash = hashlib.sha256((pwd + auth_obj["salt"]).encode("utf-8")).digest()
             secret = base64.b64encode(secret_hash).decode("utf-8")
             auth_hash = hashlib.sha256((secret + auth_obj["challenge"]).encode("utf-8")).digest()
             identify_d["authentication"] = base64.b64encode(auth_hash).decode("utf-8")
@@ -1616,14 +1673,20 @@ class OBSClient:
             if msg.get("op") == 7 and msg.get("d", {}).get("requestId") == req_id:
                 return msg.get("d", {})
 
+    async def is_streaming(self):
+        res = await self.call("GetStreamStatus")
+        return bool(res.get("responseData", {}).get("outputActive", False))
+
     async def set_scene(self, scene_name):
         await self.call("SetCurrentProgramScene", {"sceneName": scene_name})
 
-    async def start_stream(self):
-        await self.call("StartStream")
+    async def ensure_streaming(self):
+        if not await self.is_streaming():
+            await self.call("StartStream")
 
-    async def stop_stream(self):
-        await self.call("StopStream")
+    async def ensure_stopped(self):
+        if await self.is_streaming():
+            await self.call("StopStream")
 
     async def restart_rtmp_source(self, active_stream_name):
         target_url = f"rtmp://127.0.0.1:{PORT_RTMP}/{APP_NAME}"
@@ -1677,89 +1740,114 @@ async def run_controller():
             await obs.connect()
             print(
                 f"[NOALBS] Connected to Lightweight OBS WebSocket. "
-                f"Live='{OBS_SCENE_LIVE}', BRB='{OBS_SCENE_BRB}', "
-                f"Low=<{LOW_BITRATE}kbps, Restore>={RESTORE_BITRATE}kbps, "
+                f"Main='{OBS_SCENE_LIVE}', BRB='{OBS_SCENE_BRB}', "
+                f"Low=<={LOW_BITRATE:.0f}kbps, Restore>{RESTORE_BITRATE:.0f}kbps, "
                 f"Loop={BRB_VIDEO_LOOP}, Timeout={CLOUD_BRB_TIMEOUT}s",
                 flush=True,
             )
+            await obs.set_scene(OBS_SCENE_LIVE)
             break
         except Exception as exc:
             print(f"[NOALBS] Waiting for OBS WebSocket ({exc})...", flush=True)
             await asyncio.sleep(2)
 
+    tracker = BitrateTracker()
     state = "IDLE"  # IDLE -> LIVE <-> BRB -> IDLE
     low_streak = 0
     restore_streak = 0
     live_started_at = None
     brb_started_at = None
+    last_brb_log_at = 0.0
+    cooldown_until = 0.0
 
     while True:
         try:
-            publishing, kbps, active_name = get_ingest_stats()
+            publishing, bw_in_kbps, bytes_in, active_name = get_ingest_stats()
+            kbps = tracker.update(publishing, bw_in_kbps, bytes_in)
+            now = time.monotonic()
 
             if state == "IDLE":
-                if publishing:
-                    print(f"[NOALBS] Live ingest detected (stream='{active_name}', {kbps:.0f} kbps). Switching to '{OBS_SCENE_LIVE}' and starting stream...", flush=True)
+                if now < cooldown_until:
+                    pass
+                elif publishing:
+                    print(
+                        f"[NOALBS] Ingest traffic detected (stream='{active_name}', {kbps:.0f} kbps). "
+                        f"Switching OBS to '{OBS_SCENE_LIVE}' and going ONLINE...",
+                        flush=True,
+                    )
                     await obs.restart_rtmp_source(active_name)
                     await obs.set_scene(OBS_SCENE_LIVE)
-                    await obs.start_stream()
+                    await obs.ensure_streaming()
                     state = "LIVE"
-                    live_started_at = time.monotonic()
+                    live_started_at = now
                     low_streak = 0
                     restore_streak = 0
                     brb_started_at = None
 
             elif state == "LIVE":
-                in_warmup = (time.monotonic() - (live_started_at or 0.0)) < 10.0
-                if (not publishing) or (not in_warmup and kbps < LOW_BITRATE):
+                in_warmup = (now - (live_started_at or 0.0)) < 4.0
+                if (not publishing) or (not in_warmup and kbps <= LOW_BITRATE):
                     low_streak += 1
                     if low_streak >= 3:
                         print(
-                            f"[NOALBS] Bitrate dropped ({kbps:.0f} kbps < {LOW_BITRATE:.0f} kbps, publishing={publishing}). "
+                            f"[NOALBS] Bitrate dropped ({kbps:.0f} kbps <= {LOW_BITRATE:.0f} kbps, publishing={publishing}). "
                             f"Switching to '{OBS_SCENE_BRB}' (loop={BRB_VIDEO_LOOP}, timeout={CLOUD_BRB_TIMEOUT}s).",
                             flush=True,
                         )
                         await obs.refresh_brb_source()
                         await obs.set_scene(OBS_SCENE_BRB)
+                        await obs.ensure_streaming()
                         state = "BRB"
-                        brb_started_at = time.monotonic()
+                        brb_started_at = now
+                        last_brb_log_at = now
                         restore_streak = 0
                 else:
                     low_streak = 0
 
             elif state == "BRB":
-                elapsed = time.monotonic() - (brb_started_at or time.monotonic())
-                if publishing and kbps >= RESTORE_BITRATE:
+                elapsed = now - (brb_started_at or now)
+                if publishing and kbps > RESTORE_BITRATE:
                     restore_streak += 1
-                    if restore_streak >= 3:
+                    if restore_streak >= 2:
                         print(
-                            f"[NOALBS] Connection restored ({kbps:.0f} kbps >= {RESTORE_BITRATE:.0f} kbps). "
+                            f"[NOALBS] Connection restored ({kbps:.0f} kbps > {RESTORE_BITRATE:.0f} kbps). "
                             f"Switching back to '{OBS_SCENE_LIVE}'.",
                             flush=True,
                         )
                         await obs.restart_rtmp_source(active_name)
                         await obs.set_scene(OBS_SCENE_LIVE)
                         state = "LIVE"
-                        live_started_at = time.monotonic()
+                        live_started_at = now
                         low_streak = 0
                         restore_streak = 0
                         brb_started_at = None
                 else:
                     restore_streak = 0
-                    if elapsed >= CLOUD_BRB_TIMEOUT:
+                    if now - last_brb_log_at >= 30.0:
+                        remaining = max(0, int(CLOUD_BRB_TIMEOUT - elapsed))
                         print(
-                            f"[NOALBS] Disconnection timeout ({CLOUD_BRB_TIMEOUT}s) reached. "
-                            f"Disconnecting stream and returning to IDLE.",
+                            f"[NOALBS] Disconnection protection active on '{OBS_SCENE_BRB}' "
+                            f"({int(elapsed)}s/{CLOUD_BRB_TIMEOUT}s elapsed, {remaining}s remaining).",
                             flush=True,
                         )
-                        await obs.stop_stream()
+                        last_brb_log_at = now
+
+                    if elapsed >= CLOUD_BRB_TIMEOUT:
+                        print(
+                            f"[NOALBS] BRB timeout ({CLOUD_BRB_TIMEOUT}s) reached. "
+                            f"Taking OBS offline, resetting to '{OBS_SCENE_LIVE}', and returning to IDLE.",
+                            flush=True,
+                        )
+                        await obs.ensure_stopped()
                         drop_ingest_publisher()
                         await obs.set_scene(OBS_SCENE_LIVE)
+                        tracker.reset()
                         state = "IDLE"
                         live_started_at = None
                         low_streak = 0
                         restore_streak = 0
                         brb_started_at = None
+                        cooldown_until = now + 5.0
 
         except Exception as exc:
             print(f"[NOALBS] Controller warning: {exc}. Reconnecting OBS WebSocket...", flush=True)
@@ -1775,6 +1863,117 @@ async def run_controller():
 if __name__ == "__main__":
     asyncio.run(run_controller())
 CONTROLLER_PY_EOF
+
+    cat << 'TEST_OBS_PY_EOF' > "$BRIDGE_DIR/test_obs_ws.py"
+#!/usr/bin/env python3
+import asyncio
+import base64
+import hashlib
+import json
+import os
+import urllib.request
+import uuid
+import xml.etree.ElementTree as ET
+import websockets
+
+WS_PORT = int(os.environ.get("OBS_WS_PORT", "4455"))
+WS_PASS = os.environ.get("OBS_WS_PASSWORD", "")
+SCENE_LIVE = os.environ.get("OBS_SCENE_LIVE", "main")
+SCENE_BRB = os.environ.get("OBS_SCENE_BRB", "brb")
+APP_NAME = os.environ.get("APP_NAME", "live")
+INTERNAL_PORT = os.environ.get("INTERNAL_RTMP_PORT", "19359")
+WS_CONFIG_PATH = "/root/.config/obs-studio/plugin_config/obs-websocket/config.json"
+
+
+def resolve_password():
+    if WS_PASS:
+        return WS_PASS
+    try:
+        with open(WS_CONFIG_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data.get("server_password") or data.get("password") or ""
+    except Exception:
+        return ""
+
+
+def is_live_publishing():
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:8090/stat", timeout=1.5) as resp:
+            root = ET.fromstring(resp.read())
+        for app in root.findall(".//application"):
+            name_el = app.find("name")
+            if name_el is not None and name_el.text == APP_NAME:
+                for stream in app.findall(".//stream"):
+                    if stream.find("publishing") is not None:
+                        return True
+    except Exception:
+        pass
+    return False
+
+
+async def main():
+    async with websockets.connect(f"ws://127.0.0.1:{WS_PORT}", ping_interval=None) as ws:
+        hello = json.loads(await ws.recv())
+        auth = hello.get("d", {}).get("authentication")
+        ident = {"rpcVersion": 1}
+        if auth:
+            pwd = resolve_password()
+            s = base64.b64encode(hashlib.sha256((pwd + auth["salt"]).encode("utf-8")).digest()).decode("utf-8")
+            a = base64.b64encode(hashlib.sha256((s + auth["challenge"]).encode("utf-8")).digest()).decode("utf-8")
+            ident["authentication"] = a
+        await ws.send(json.dumps({"op": 1, "d": ident}))
+        res = json.loads(await ws.recv())
+        assert res.get("op") == 2, f"Auth failed: {res}"
+        print("OK:OBS_WS_AUTH")
+
+        async def call(req, data=None):
+            rid = str(uuid.uuid4())
+            msg = {"op": 6, "d": {"requestType": req, "requestId": rid}}
+            if data is not None:
+                msg["d"]["requestData"] = data
+            await ws.send(json.dumps(msg))
+            while True:
+                r = json.loads(await ws.recv())
+                if r.get("op") == 7 and r.get("d", {}).get("requestId") == rid:
+                    assert r["d"]["requestStatus"]["result"], f"{req} failed: {r}"
+                    return r["d"].get("responseData", {})
+
+        scenes_data = await call("GetSceneList")
+        scene_names = [s["sceneName"] for s in scenes_data.get("scenes", [])]
+        assert SCENE_LIVE in scene_names, f"Missing live scene '{SCENE_LIVE}' in {scene_names}"
+        assert SCENE_BRB in scene_names, f"Missing brb scene '{SCENE_BRB}' in {scene_names}"
+        print(f"OK:SCENES_VERIFIED:{SCENE_LIVE},{SCENE_BRB}")
+
+        main_items = await call("GetSceneItemList", {"sceneName": SCENE_LIVE})
+        main_sources = [i["sourceName"] for i in main_items.get("sceneItems", [])]
+        assert "RTMP_Ingest_Source" in main_sources, f"Missing RTMP_Ingest_Source in {main_sources}"
+        print("OK:MAIN_SOURCE_VERIFIED")
+
+        brb_items = await call("GetSceneItemList", {"sceneName": SCENE_BRB})
+        brb_sources = [i["sourceName"] for i in brb_items.get("sceneItems", [])]
+        assert "BRB_Browser_Source" in brb_sources, f"Missing BRB_Browser_Source in {brb_sources}"
+        print("OK:BRB_SOURCE_VERIFIED")
+
+        svc = await call("GetStreamServiceSettings")
+        server_url = svc.get("streamServiceSettings", {}).get("server", "")
+        assert f":{INTERNAL_PORT}/{APP_NAME}" in server_url, f"Unexpected OBS output server: {server_url}"
+        print(f"OK:OBS_OUTPUT_RELAY:{server_url}")
+
+        if not is_live_publishing():
+            await call("SetCurrentProgramScene", {"sceneName": SCENE_BRB})
+            cur1 = (await call("GetCurrentProgramScene")).get("currentProgramSceneName")
+            assert cur1 == SCENE_BRB, f"Expected '{SCENE_BRB}', got '{cur1}'"
+            await call("SetCurrentProgramScene", {"sceneName": SCENE_LIVE})
+            cur2 = (await call("GetCurrentProgramScene")).get("currentProgramSceneName")
+            assert cur2 == SCENE_LIVE, f"Expected '{SCENE_LIVE}', got '{cur2}'"
+            print("OK:SCENE_SWITCH_ROUNDTRIP")
+        else:
+            print("SKIP:LIVE_STREAM_ACTIVE")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+TEST_OBS_PY_EOF
 
     cat << 'ENTRYPOINT_EOF' > "$BRIDGE_DIR/entrypoint.sh"
 #!/bin/bash
@@ -1802,11 +2001,23 @@ pulseaudio -D --exit-idle-time=-1 --disallow-exit --log-target=file:/tmp/pulse.l
 pactl load-module module-null-sink sink_name=obs_virtual_sink sink_properties=device.description="OBS_Virtual_Audio" >/dev/null 2>&1 || true
 pactl set-default-sink obs_virtual_sink >/dev/null 2>&1 || true
 
-# Launch Lightweight Headless OBS with preconfigured 'main' & 'brb' scenes
-obs --profile CookieRTMPS --collection CookieRTMPS --disable-shutdown-check >/tmp/obs.log 2>&1 &
+# Launch Lightweight Headless OBS with preconfigured 'main' & 'brb' scenes and explicit WebSocket flags
+OBS_WS_PORT_VAL="${OBS_WS_PORT:-4455}"
+OBS_ARGS=(
+    --profile CookieRTMPS
+    --collection CookieRTMPS
+    --disable-shutdown-check
+    --disable-missing-files-check
+    --websocket_port="$OBS_WS_PORT_VAL"
+    --websocket_ipv4_only
+)
+if [ -n "$OBS_WS_PASSWORD" ]; then
+    OBS_ARGS+=(--websocket_password="$OBS_WS_PASSWORD")
+fi
+
+obs "${OBS_ARGS[@]}" >/tmp/obs.log 2>&1 &
 
 # Wait up to 20s for OBS WebSocket to bind before starting controller
-OBS_WS_PORT_VAL="${OBS_WS_PORT:-4455}"
 for _ in $(seq 1 40); do
     if python3 -c "import socket; s=socket.create_connection(('127.0.0.1', int('$OBS_WS_PORT_VAL')), 0.5); s.close()" 2>/dev/null; then
         break
@@ -1818,7 +2029,7 @@ done
 exec python3 /opt/obs-bridge/noalbs_controller.py
 ENTRYPOINT_EOF
 
-    chmod +x "$BRIDGE_DIR/entrypoint.sh" "$BRIDGE_DIR/setup_obs.py" "$BRIDGE_DIR/noalbs_controller.py"
+    chmod +x "$BRIDGE_DIR/entrypoint.sh" "$BRIDGE_DIR/setup_obs.py" "$BRIDGE_DIR/noalbs_controller.py" "$BRIDGE_DIR/test_obs_ws.py"
 }
 
 run_full_integration_tests() {
@@ -1992,101 +2203,17 @@ s.close()
             fi
         fi
 
-        # Live OBS WebSocket v5 API & Scene Verification
+        # Wait up to 10s for OBS WebSocket port before running live API verification
+        for _ in $(seq 1 20); do
+            if docker exec cookie-rtmps-obs python3 -c "import socket; s=socket.create_connection(('127.0.0.1', int('$OBS_WS_PORT')), 0.5); s.close()" 2>/dev/null; then
+                break
+            fi
+            sleep 0.5
+        done
+
+        # Live OBS WebSocket v5 API & Scene Verification (runs baked-in script without stdin pipe issues)
         local OBS_TEST_OUTPUT
-        OBS_TEST_OUTPUT=$(docker exec cookie-rtmps-obs python3 - << 'PY_OBS_TEST' 2>&1
-import asyncio
-import base64
-import hashlib
-import json
-import os
-import urllib.request
-import uuid
-import xml.etree.ElementTree as ET
-import websockets
-
-ws_port = int(os.environ.get("OBS_WS_PORT", "4455"))
-ws_pass = os.environ.get("OBS_WS_PASSWORD", "")
-scene_live = os.environ.get("OBS_SCENE_LIVE", "main")
-scene_brb = os.environ.get("OBS_SCENE_BRB", "brb")
-app_name = os.environ.get("APP_NAME", "live")
-internal_port = os.environ.get("INTERNAL_RTMP_PORT", "19359")
-
-def is_live_publishing():
-    try:
-        with urllib.request.urlopen("http://127.0.0.1:8090/stat", timeout=1.5) as resp:
-            root = ET.fromstring(resp.read())
-        for app in root.findall(".//application"):
-            name_el = app.find("name")
-            if name_el is not None and name_el.text == app_name:
-                for stream in app.findall(".//stream"):
-                    if stream.find("publishing") is not None:
-                        return True
-    except Exception:
-        pass
-    return False
-
-async def main():
-    async with websockets.connect(f"ws://127.0.0.1:{ws_port}", ping_interval=None) as ws:
-        hello = json.loads(await ws.recv())
-        auth = hello.get("d", {}).get("authentication")
-        ident = {"rpcVersion": 1}
-        if auth and ws_pass:
-            s = base64.b64encode(hashlib.sha256((ws_pass + auth["salt"]).encode()).digest()).decode()
-            a = base64.b64encode(hashlib.sha256((s + auth["challenge"]).encode()).digest()).decode()
-            ident["authentication"] = a
-        await ws.send(json.dumps({"op": 1, "d": ident}))
-        res = json.loads(await ws.recv())
-        assert res.get("op") == 2, f"Auth failed: {res}"
-        print("OK:OBS_WS_AUTH")
-
-        async def call(req, data=None):
-            rid = str(uuid.uuid4())
-            msg = {"op": 6, "d": {"requestType": req, "requestId": rid}}
-            if data is not None:
-                msg["d"]["requestData"] = data
-            await ws.send(json.dumps(msg))
-            while True:
-                r = json.loads(await ws.recv())
-                if r.get("op") == 7 and r.get("d", {}).get("requestId") == rid:
-                    assert r["d"]["requestStatus"]["result"], f"{req} failed: {r}"
-                    return r["d"].get("responseData", {})
-
-        scenes_data = await call("GetSceneList")
-        scene_names = [s["sceneName"] for s in scenes_data.get("scenes", [])]
-        assert scene_live in scene_names, f"Missing live scene '{scene_live}' in {scene_names}"
-        assert scene_brb in scene_names, f"Missing brb scene '{scene_brb}' in {scene_names}"
-        print(f"OK:SCENES_VERIFIED:{scene_live},{scene_brb}")
-
-        main_items = await call("GetSceneItemList", {"sceneName": scene_live})
-        main_sources = [i["sourceName"] for i in main_items.get("sceneItems", [])]
-        assert "RTMP_Ingest_Source" in main_sources, f"Missing RTMP_Ingest_Source in {main_sources}"
-        print("OK:MAIN_SOURCE_VERIFIED")
-
-        brb_items = await call("GetSceneItemList", {"sceneName": scene_brb})
-        brb_sources = [i["sourceName"] for i in brb_items.get("sceneItems", [])]
-        assert "BRB_Browser_Source" in brb_sources, f"Missing BRB_Browser_Source in {brb_sources}"
-        print("OK:BRB_SOURCE_VERIFIED")
-
-        svc = await call("GetStreamServiceSettings")
-        server_url = svc.get("streamServiceSettings", {}).get("server", "")
-        assert f":{internal_port}/{app_name}" in server_url, f"Unexpected OBS output server: {server_url}"
-        print(f"OK:OBS_OUTPUT_RELAY:{server_url}")
-
-        if not is_live_publishing():
-            await call("SetCurrentProgramScene", {"sceneName": scene_brb})
-            cur1 = (await call("GetCurrentProgramScene")).get("currentProgramSceneName")
-            assert cur1 == scene_brb, f"Expected '{scene_brb}', got '{cur1}'"
-            await call("SetCurrentProgramScene", {"sceneName": scene_live})
-            cur2 = (await call("GetCurrentProgramScene")).get("currentProgramSceneName")
-            assert cur2 == scene_live, f"Expected '{scene_live}', got '{cur2}'"
-            print("OK:SCENE_SWITCH_ROUNDTRIP")
-        else:
-            print("SKIP:LIVE_STREAM_ACTIVE")
-
-asyncio.run(main())
-PY_OBS_TEST
-        )
+        OBS_TEST_OUTPUT=$(docker exec cookie-rtmps-obs python3 /opt/obs-bridge/test_obs_ws.py 2>&1)
 
         if echo "$OBS_TEST_OUTPUT" | grep -q "OK:OBS_WS_AUTH"; then
             record_pass "OBS WebSocket v5 connected and authenticated on port ${OBS_WS_PORT}."
@@ -2492,7 +2619,7 @@ if p.exists():
         echo -e "${YELLOW}Waiting for Lightweight OBS & WebSocket server to initialize...${NC}"
         for _ in $(seq 1 40); do
             if python3 -c "import socket; s=socket.create_connection(('127.0.0.1', int('$PORT_RTMP')), 0.5); s.close()" 2>/dev/null \
-               && python3 -c "import socket; s=socket.create_connection(('127.0.0.1', int('$OBS_WS_PORT')), 0.5); s.close()" 2>/dev/null; then
+               && docker exec cookie-rtmps-obs python3 -c "import socket; s=socket.create_connection(('127.0.0.1', int('$OBS_WS_PORT')), 0.5); s.close()" 2>/dev/null; then
                 break
             fi
             sleep 0.5
@@ -2505,10 +2632,10 @@ if p.exists():
     echo -e "Vertical stream:  rtmp://${DISPLAY_HOST}:${PORT_RTMP}/vertical"
     if [ "$NOALBS_ENABLED" == "true" ]; then
         echo -e "${CYAN}Disconnection Protection: ACTIVE${NC}"
-        echo -e "  - Main Scene: '${OBS_SCENE_LIVE}' (RTMP Ingest)"
-        echo -e "  - BRB Scene:  '${OBS_SCENE_BRB}' (Direct Browser Source MP4: ${BRB_VIDEO_URL}, Loop=${BRB_VIDEO_LOOP})"
-        echo -e "  - Trigger:    < ${LOW_BITRATE} kbps -> '${OBS_SCENE_BRB}' | >= ${RESTORE_BITRATE} kbps -> '${OBS_SCENE_LIVE}'"
-        echo -e "  - Timeout:    Disconnects stream after ${CLOUD_BRB_TIMEOUT} seconds in BRB"
+        echo -e "  - Main Scene: '${OBS_SCENE_LIVE}' (RTMP/RTMPS Ingest)"
+        echo -e "  - BRB Scene:  '${OBS_SCENE_BRB}' (Direct MP4 URL: ${BRB_VIDEO_URL}, Loop=${BRB_VIDEO_LOOP})"
+        echo -e "  - Trigger:    <= ${LOW_BITRATE} kbps -> '${OBS_SCENE_BRB}' | > ${RESTORE_BITRATE} kbps -> '${OBS_SCENE_LIVE}'"
+        echo -e "  - Timeout:    Takes OBS offline & resets to '${OBS_SCENE_LIVE}' after ${CLOUD_BRB_TIMEOUT}s in BRB"
     else
         echo -e "${YELLOW}Disconnection Protection (Lightweight OBS): DISABLED (Toggle ON in Menu Option 8 -> 1 to enable)${NC}"
     fi
@@ -2547,12 +2674,12 @@ view_logs() {
                 fflush()
                 next
             }
-            /WARNING|warning|LOW|low|taking over|Bitrate dropped|timeout/ {
+            /WARNING|warning|LOW|low|taking over|Bitrate dropped|timeout|Disconnection protection/ {
                 print "\033[1;33m" $0 "\033[0m"
                 fflush()
                 next
             }
-            /NOALBS|Cloud BRB|Connection restored|Live ingest/ {
+            /NOALBS|Cloud BRB|Connection restored|Ingest traffic/ {
                 print "\033[0;36m" $0 "\033[0m"
                 fflush()
                 next
@@ -2679,7 +2806,7 @@ while true; do
     echo -e "  RTMP Ingest:     rtmp://${DISPLAY_HOST}:${PORT_RTMP}/${APP_NAME}"
     echo -e "  Vertical Ingest: rtmp://${DISPLAY_HOST}:${PORT_RTMP}/vertical"
     if [ "$NOALBS_ENABLED" == "true" ]; then
-        echo -e "  OBS Protection:  ${GREEN}ENABLED${NC} ['${OBS_SCENE_LIVE}' <-> '${OBS_SCENE_BRB}' | <${LOW_BITRATE}kbps | Loop:${BRB_VIDEO_LOOP} | Timeout:${CLOUD_BRB_TIMEOUT}s]"
+        echo -e "  OBS Protection:  ${GREEN}ENABLED${NC} ['${OBS_SCENE_LIVE}' <-> '${OBS_SCENE_BRB}' | <=${LOW_BITRATE}kbps | Loop:${BRB_VIDEO_LOOP} | Timeout:${CLOUD_BRB_TIMEOUT}s]"
     else
         echo -e "  OBS Protection:  ${RED}DISABLED${NC}"
     fi
