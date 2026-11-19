@@ -1020,8 +1020,7 @@ ENV LIBGL_ALWAYS_SOFTWARE=1
 ENV MESA_GL_VERSION_OVERRIDE=3.3
 ENV QT_QPA_PLATFORM=xcb
 
-RUN echo 'deb [trusted=yes] http://ppa.launchpadcontent.net/obsproject/obs-studio/ubuntu noble main' > /etc/apt/sources.list.d/obs-studio.list \
-    && (apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=10 update || true) \
+RUN apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=15 update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
@@ -1828,7 +1827,15 @@ run_full_integration_tests() {
         record_fail "Container 'cookie-rtmps' is NOT running."
     fi
 
-    if docker exec cookie-rtmps pgrep -x nginx >/dev/null 2>&1; then
+    # Wait up to 10s for cookie-rtmps entrypoint to bring up nginx & stunnel
+    for _ in $(seq 1 20); do
+        if docker exec cookie-rtmps pgrep -f "nginx" >/dev/null 2>&1; then
+            break
+        fi
+        sleep 0.5
+    done
+
+    if docker exec cookie-rtmps pgrep -f "nginx" >/dev/null 2>&1; then
         record_pass "Nginx-RTMP relay daemon is active inside 'cookie-rtmps'."
     else
         record_fail "Nginx-RTMP relay daemon is not running inside 'cookie-rtmps'."
@@ -1840,7 +1847,7 @@ run_full_integration_tests() {
         record_fail "Nginx configuration syntax check failed inside 'cookie-rtmps'."
     fi
 
-    if docker exec cookie-rtmps pgrep -x stunnel >/dev/null 2>&1 || docker exec cookie-rtmps pgrep -x stunnel4 >/dev/null 2>&1; then
+    if docker exec cookie-rtmps pgrep -f "stunnel" >/dev/null 2>&1; then
         record_pass "Stunnel RTMPS TLS bridge is running."
     else
         record_warn "Stunnel process not active (normal if only plain rtmp:// targets are configured)."
@@ -2087,6 +2094,8 @@ PY_OBS_TEST
         else
             record_fail "OBS WebSocket scene-switch roundtrip failed."
         fi
+    else
+        record_warn "Disconnection Protection (Lightweight OBS) is DISABLED — enable Option 8 -> 1 to deploy 'cookie-rtmps-obs'."
     fi
 
     # 4. Run Repository integration_test.sh if present
@@ -2361,7 +2370,13 @@ build_and_run() {
         return
     fi
 
-    sleep 2
+    echo -e "${YELLOW}Waiting for CookieRTMPS services (nginx, stunnel, gunicorn) to initialize...${NC}"
+    for _ in $(seq 1 30); do
+        if docker exec cookie-rtmps pgrep -f "nginx" >/dev/null 2>&1; then
+            break
+        fi
+        sleep 0.5
+    done
 
     # Ensure multi-IP / WireGuard CIDR whitelist entries are split into separate Nginx directives if running direct mode
     if [ "$NOALBS_ENABLED" != "true" ] && [[ "$ACCEPTED_IP" == *" "* ]]; then
@@ -2458,6 +2473,8 @@ if p.exists():
         echo -e "  - BRB Scene:  '${OBS_SCENE_BRB}' (Direct Browser Source MP4: ${BRB_VIDEO_URL}, Loop=${BRB_VIDEO_LOOP})"
         echo -e "  - Trigger:    < ${LOW_BITRATE} kbps -> '${OBS_SCENE_BRB}' | >= ${RESTORE_BITRATE} kbps -> '${OBS_SCENE_LIVE}'"
         echo -e "  - Timeout:    Disconnects stream after ${CLOUD_BRB_TIMEOUT} seconds in BRB"
+    else
+        echo -e "${YELLOW}Disconnection Protection (Lightweight OBS): DISABLED (Toggle ON in Menu Option 8 -> 1 to enable)${NC}"
     fi
 
     run_full_integration_tests
