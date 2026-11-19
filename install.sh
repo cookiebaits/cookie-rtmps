@@ -9,6 +9,7 @@ cd "$SCRIPT_DIR" || exit 1
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 # Default values
@@ -62,20 +63,23 @@ CHUNK_SIZE="8192"
 
 # Host Port Settings
 PORT_RTMP="1935"
+INTERNAL_RTMP_PORT="19359"
 
-# NOALBS Settings (Disabled by default)
+# NOALBS & Lightweight OBS Disconnection Protection Settings
 NOALBS_ENABLED="false"
-FALLBACK_MODE="video"
+FALLBACK_MODE="obs"
 OBS_WS_HOST="127.0.0.1"
 OBS_WS_PORT="4455"
 OBS_WS_PASSWORD=""
-OBS_SCENE_LIVE="Main"
-OBS_SCENE_BRB="BRB"
+OBS_SCENE_LIVE="main"
+OBS_SCENE_BRB="brb"
 LOW_BITRATE="1000"
 RESTORE_BITRATE="1500"
-CLOUD_BRB="false"
-BRB_VIDEO_URL=""
+CLOUD_BRB="true"
+BRB_VIDEO_URL="https://filedn.com/lfh40bKbFfD5um9HDFNrJFR/brb.mp4"
+BRB_VIDEO_LOOP="true"
 CLOUD_BRB_TIMEOUT="300"
+OBS_BRIDGE_BITRATE="6000"
 
 CONFIG_FILE="$SCRIPT_DIR/rtmp_config.env"
 PERSIST_USER_DIR="$HOME/.cookie-rtmps"
@@ -93,7 +97,7 @@ CONFIG_VARS=(
     V_RTMP1_URL V_RTMP1_KEY OBS_KEY APP_NAME ACCEPTED_IP SERVER_DOMAIN CHUNK_SIZE
     NOALBS_ENABLED FALLBACK_MODE OBS_WS_HOST OBS_WS_PORT OBS_WS_PASSWORD
     OBS_SCENE_LIVE OBS_SCENE_BRB LOW_BITRATE RESTORE_BITRATE CLOUD_BRB
-    BRB_VIDEO_URL CLOUD_BRB_TIMEOUT PORT_RTMP
+    BRB_VIDEO_URL BRB_VIDEO_LOOP CLOUD_BRB_TIMEOUT OBS_BRIDGE_BITRATE PORT_RTMP
 )
 
 get_sudo() {
@@ -181,6 +185,14 @@ sync_and_preserve_installation() {
         write_config_to_path "$CONFIG_FILE"
         found_config="$CONFIG_FILE"
     fi
+
+    # Normalize defaults if missing from older config files
+    [ -z "$OBS_SCENE_LIVE" ] && OBS_SCENE_LIVE="main"
+    [ -z "$OBS_SCENE_BRB" ] && OBS_SCENE_BRB="brb"
+    [ -z "$BRB_VIDEO_URL" ] && BRB_VIDEO_URL="https://filedn.com/lfh40bKbFfD5um9HDFNrJFR/brb.mp4"
+    [ -z "$BRB_VIDEO_LOOP" ] && BRB_VIDEO_LOOP="true"
+    [ -z "$CLOUD_BRB_TIMEOUT" ] && CLOUD_BRB_TIMEOUT="300"
+    [ -z "$OBS_BRIDGE_BITRATE" ] && OBS_BRIDGE_BITRATE="6000"
 
     local old_install_dirs=(
         "$(dirname "$SCRIPT_DIR")"
@@ -699,38 +711,158 @@ configure_domain() {
     sleep 1
 }
 
+detect_wireguard_ips() {
+    local SUDO
+    SUDO=$(get_sudo)
+    local raw_entries=()
+
+    # 1. Active WireGuard network interfaces (wg0, wg1, etc.)
+    if command -v ip &> /dev/null; then
+        while IFS= read -r cidr; do
+            [ -n "$cidr" ] && raw_entries+=("$cidr")
+        done < <(ip -4 -o addr show 2>/dev/null | awk '$2 ~ /^wg/ {print $4}')
+
+        while IFS= read -r route_cidr; do
+            [ -n "$route_cidr" ] && [ "$route_cidr" != "default" ] && raw_entries+=("$route_cidr")
+        done < <(ip -4 route show 2>/dev/null | awk '/dev wg/ {print $1}')
+    fi
+
+    # 2. Active WireGuard peer allowed-ips via wg CLI
+    if command -v wg &> /dev/null; then
+        while IFS= read -r allowed_cidr; do
+            [ -n "$allowed_cidr" ] && raw_entries+=("$allowed_cidr")
+        done < <($SUDO wg show all allowed-ips 2>/dev/null | tr '\t ' '\n' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?$' | grep -v '^0\.0\.0\.0/0$' || true)
+    fi
+
+    # 3. /etc/wireguard/*.conf fallback (Address and AllowedIPs)
+    if [ -d "/etc/wireguard" ] || $SUDO test -d "/etc/wireguard" 2>/dev/null; then
+        while IFS= read -r conf_cidr; do
+            [ -n "$conf_cidr" ] && raw_entries+=("$conf_cidr")
+        done < <($SUDO grep -hE '^\s*(Address|AllowedIPs)\s*=' /etc/wireguard/*.conf 2>/dev/null \
+            | sed 's/^[^=]*=//' \
+            | tr ',' '\n' \
+            | tr -d ' \t\r' \
+            | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?$' \
+            | grep -v '^0\.0\.0\.0/0$' || true)
+    fi
+
+    [ ${#raw_entries[@]} -eq 0 ] && return 0
+
+    if command -v python3 &> /dev/null; then
+        python3 - "${raw_entries[@]}" << 'PY_WG_EOF'
+import ipaddress
+import sys
+
+networks = []
+hosts = []
+for token in sys.argv[1:]:
+    token = token.strip()
+    if not token:
+        continue
+    try:
+        if "/" in token:
+            iface = ipaddress.ip_interface(token)
+            if iface.version != 4 or iface.network.prefixlen == 0:
+                continue
+            if iface.network.prefixlen == 32:
+                hosts.append(str(iface.ip))
+            else:
+                networks.append(iface.network)
+        else:
+            addr = ipaddress.ip_address(token)
+            if addr.version == 4:
+                hosts.append(str(addr))
+    except ValueError:
+        continue
+
+unique_nets = []
+for net in sorted(set(networks), key=lambda n: n.prefixlen):
+    if not any(net.subnet_of(existing) for existing in unique_nets):
+        unique_nets.append(net)
+
+result = [str(net) for net in unique_nets]
+for h in dict.fromkeys(hosts):
+    ip_obj = ipaddress.ip_address(h)
+    if not any(ip_obj in net for net in unique_nets):
+        result.append(h)
+
+print(" ".join(result))
+PY_WG_EOF
+    else
+        printf '%s\n' "${raw_entries[@]}" | sed 's|/32$||' | awk '!seen[$0]++' | tr '\n' ' ' | sed 's/[[:space:]]*$//'
+    fi
+}
+
+append_unique_whitelist_entries() {
+    local current="$1"
+    local additions="$2"
+    local combined=()
+    for item in $current $additions; do
+        [ -z "$item" ] && continue
+        local exists=0
+        for existing in "${combined[@]}"; do
+            if [ "$existing" == "$item" ]; then
+                exists=1
+                break
+            fi
+        done
+        [ "$exists" -eq 0 ] && combined+=("$item")
+    done
+    echo "${combined[*]}"
+}
+
 configure_whitelist() {
     while true; do
         clear
         echo -e "${GREEN}=== IP Whitelist Configuration ===${NC}"
-        echo -e "Current Accepted IP: ${YELLOW}${ACCEPTED_IP:-None (Allow All)}${NC}"
+        echo -e "Current Accepted IP(s): ${YELLOW}${ACCEPTED_IP:-None (Allow All)}${NC}"
         echo ""
-        echo "1) Server's IP Address (For those who proxy, VPN or Wireguard Into the Server)"
-        echo "2) Manual IP Address"
-        echo "3) Clear IP Address"
+        echo "1) Server Public IP + WireGuard VPN IPs/Subnets (Auto-Detect)"
+        echo "2) Add Manual IP Address or CIDR Subnet (e.g. 10.66.66.0/24)"
+        echo "3) Clear IP Whitelist (Allow All)"
         echo "4) Back to Main Menu"
         echo -e "Select an option: \c"
         read -r wl_opt
 
         case $wl_opt in
             1)
-                local SERVER_IP_FETCH
-                SERVER_IP_FETCH=$(curl -4 -s --max-time 3 ifconfig.me || echo "")
+                local SERVER_IP_FETCH WG_IPS NEW_WHITELIST=""
+                SERVER_IP_FETCH=$(curl -4 -s --max-time 3 ifconfig.me 2>/dev/null || ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -n 1)
                 if [ -n "$SERVER_IP_FETCH" ]; then
-                    ACCEPTED_IP="$SERVER_IP_FETCH"
                     CACHED_SERVER_IP="$SERVER_IP_FETCH"
-                    echo -e "${GREEN}IP Whitelist updated to server IP: $ACCEPTED_IP${NC}"
+                    NEW_WHITELIST=$(append_unique_whitelist_entries "$NEW_WHITELIST" "$SERVER_IP_FETCH")
+                    echo -e "${GREEN}Detected Server Public IP: $SERVER_IP_FETCH${NC}"
                 else
-                    echo -e "${RED}Failed to fetch server IP.${NC}"
+                    echo -e "${YELLOW}Warning: Could not fetch server public IP.${NC}"
                 fi
-                save_config
+
+                WG_IPS=$(detect_wireguard_ips)
+                if [ -n "$WG_IPS" ]; then
+                    NEW_WHITELIST=$(append_unique_whitelist_entries "$NEW_WHITELIST" "$WG_IPS")
+                    echo -e "${GREEN}Detected WireGuard IP(s)/Subnet(s): $WG_IPS${NC}"
+                else
+                    echo -e "${YELLOW}No active WireGuard interface or /etc/wireguard/*.conf detected.${NC}"
+                    echo -e "Enter custom WireGuard subnet/IP to include (e.g. 10.66.66.0/24, or press Enter to skip): \c"
+                    read -r custom_wg
+                    if [ -n "$custom_wg" ]; then
+                        NEW_WHITELIST=$(append_unique_whitelist_entries "$NEW_WHITELIST" "$custom_wg")
+                    fi
+                fi
+
+                if [ -n "$NEW_WHITELIST" ]; then
+                    ACCEPTED_IP="$NEW_WHITELIST"
+                    echo -e "${GREEN}IP Whitelist updated to: $ACCEPTED_IP${NC}"
+                    save_config
+                else
+                    echo -e "${RED}No IPs detected to add.${NC}"
+                fi
                 sleep 1
                 ;;
             2)
-                echo -e "Enter IP address to whitelist: \c"
+                echo -e "Enter IP address or CIDR subnet to add (space-separated supported): \c"
                 read -r ip_input
                 if [ -n "$ip_input" ]; then
-                    ACCEPTED_IP="$ip_input"
+                    ACCEPTED_IP=$(append_unique_whitelist_entries "$ACCEPTED_IP" "$ip_input")
                     echo -e "${GREEN}IP Whitelist updated to: $ACCEPTED_IP${NC}"
                     save_config
                 fi
@@ -748,132 +880,1244 @@ configure_whitelist() {
     done
 }
 
-ensure_brb_video_transcoded() {
-    local url="${1:-$BRB_VIDEO_URL}"
-    local target="./data/brb_video.mp4"
-    [ -z "$url" ] && url="https://filedn.com/lfh40bKbFfD5um9HDFNrJFR/brb.mp4"
-    mkdir -p ./data
-    rm -f "$target"
-    echo -e "${YELLOW}Downloading BRB video from $url ...${NC}"
-    curl -L "$url" -o "${target}.tmp"
-    if [ -f "${target}.tmp" ] && [ -s "${target}.tmp" ]; then
-        if command -v ffmpeg &> /dev/null; then
-            echo -e "${YELLOW}Transcoding BRB video with FFmpeg to ensure AAC audio and H.264 video compatibility...${NC}"
-            local duration=""
-            if command -v ffprobe &> /dev/null; then
-                duration=$(ffprobe -v error -show_entries format=duration -of default=noprintwrappers=1:nokey=1 "${target}.tmp" 2>/dev/null || true)
-            fi
-            if [ -z "$duration" ] || [ "$(awk -v d="$duration" 'BEGIN { print (d > 0) ? 1 : 0 }' 2>/dev/null)" -ne 1 ]; then
-                local dur_str
-                dur_str=$(ffmpeg -i "${target}.tmp" 2>&1 | grep "Duration" | awk '{print $2}' | tr -d ',')
-                [ -n "$dur_str" ] && duration=$(echo "$dur_str" | awk -F: '{ print ($1 * 3600) + ($2 * 60) + $3 }')
-            fi
-
-            ffmpeg -y -hide_banner -loglevel warning -i "${target}.tmp" -c:v libx264 -pix_fmt yuv420p -g 60 -c:a aac -ar 48000 -ac 2 -progress pipe:1 "$target" 2>/dev/null | while read -r line; do
-                if [[ "$line" == out_time_us=* ]]; then
-                    local us="${line#*=}"
-                    if [[ "$us" =~ ^[0-9]+$ ]] && [ -n "$duration" ]; then
-                        local pct filled unfilled bar=""
-                        pct=$(awk -v us="$us" -v dur="$duration" 'BEGIN { if (dur>0) { p=(us/1000000/dur)*100; if (p>100) p=100; printf "%.1f", p } else { print "0.0" } }')
-                        filled=$(awk -v pct="$pct" 'BEGIN { printf "%d", (pct * 30 / 100) }')
-                        unfilled=$((30 - filled))
-                        for ((i=0; i<filled; i++)); do bar="${bar}="; done
-                        if [ $unfilled -gt 0 ]; then
-                            bar="${bar}>"
-                            for ((i=1; i<unfilled; i++)); do bar="${bar} "; done
-                        fi
-                        printf "\rTranscoding BRB Video: [%s] %s%%" "$bar" "$pct"
-                    fi
-                fi
-            done
-            echo ""
-
-            if [ -f "$target" ] && [ -s "$target" ]; then
-                echo -e "${GREEN}BRB video successfully downloaded and transcoded.${NC}"
-                rm -f "${target}.tmp"
-            else
-                echo -e "${YELLOW}FFmpeg transcode warning. Using downloaded file directly.${NC}"
-                mv "${target}.tmp" "$target"
-            fi
-        else
-            mv "${target}.tmp" "$target"
-        fi
-    else
-        echo -e "${RED}Download failed.${NC}"
-        rm -f "${target}.tmp"
-    fi
-}
-
 configure_noalbs() {
     while true; do
         clear
-        echo -e "${GREEN}=== NOALBS Scene Switcher Configuration ===${NC}"
-        echo -e "Status: $([ "$NOALBS_ENABLED" == "true" ] && echo -e "${GREEN}ENABLED${NC}" || echo -e "${RED}DISABLED${NC}")"
+        echo -e "${GREEN}=== Disconnection Protection & Lightweight OBS (NOALBS) ===${NC}"
+        echo -e "Status: $([ "$NOALBS_ENABLED" == "true" ] && echo -e "${GREEN}ENABLED (Lightweight Headless OBS Active)${NC}" || echo -e "${RED}DISABLED${NC}")"
+        echo -e "${CYAN}Architecture: Ingest RTMP -> Headless OBS ['${OBS_SCENE_LIVE}' / '${OBS_SCENE_BRB}'] -> CookieRTMPS Relay${NC}"
         echo ""
-        echo "1) Toggle Enabled (Currently: $NOALBS_ENABLED)"
-        echo "2) Primary Fallback Mode (Current: ${FALLBACK_MODE:-video} [video = MP4, obs = OBS Scene Switch])"
-        echo "3) OBS WebSocket Host (Current: $OBS_WS_HOST)"
-        echo "4) OBS WebSocket Port (Current: $OBS_WS_PORT)"
-        echo "5) OBS WebSocket Password (Current: ${OBS_WS_PASSWORD:-(None)})"
-        echo "6) Main/Live Scene Name (Current: $OBS_SCENE_LIVE)"
-        echo "7) BRB Scene Name (Current: $OBS_SCENE_BRB)"
-        echo "8) Low Bitrate Threshold (Current: $LOW_BITRATE kbps)"
-        echo "9) Restore Bitrate Threshold (Current: $RESTORE_BITRATE kbps)"
-        echo "10) Toggle Cloud BRB (Currently: $CLOUD_BRB)"
-        echo "11) Configure BRB Video URL (Current: ${BRB_VIDEO_URL:-(None)})"
-        echo "12) Disconnection Protection Duration (Current: ${CLOUD_BRB_TIMEOUT} seconds)"
-        echo "13) Back to Main Menu"
+        echo "1) Toggle Disconnection Protection (Currently: $NOALBS_ENABLED)"
+        echo "2) BRB Video MP4 URL [OBS Browser Source] (Current: ${BRB_VIDEO_URL:-(None)})"
+        echo "3) Loop BRB Video While Disconnected (Currently: $BRB_VIDEO_LOOP)"
+        echo "4) Disconnect Stream Timeout After BRB Starts (Current: ${CLOUD_BRB_TIMEOUT} seconds)"
+        echo "5) Low Bitrate Threshold -> Switch to '${OBS_SCENE_BRB}' (Current: $LOW_BITRATE kbps)"
+        echo "6) Restore Bitrate Threshold -> Switch to '${OBS_SCENE_LIVE}' (Current: $RESTORE_BITRATE kbps)"
+        echo "7) Main/Live Scene Name (Current: $OBS_SCENE_LIVE)"
+        echo "8) BRB Scene Name (Current: $OBS_SCENE_BRB)"
+        echo "9) Lightweight OBS Output Bitrate (Current: ${OBS_BRIDGE_BITRATE} kbps)"
+        echo "10) OBS WebSocket Port (Current: $OBS_WS_PORT)"
+        echo "11) OBS WebSocket Password (Current: ${OBS_WS_PASSWORD:-(Disabled/Local Only)})"
+        echo "12) Back to Main Menu"
         echo -e "Select an option: \c"
         read -r noalbs_opt
 
         case $noalbs_opt in
-            1) [ "$NOALBS_ENABLED" == "true" ] && NOALBS_ENABLED="false" || NOALBS_ENABLED="true"; save_config ;;
-            2)
-                [ "$FALLBACK_MODE" == "obs" ] && FALLBACK_MODE="video" || FALLBACK_MODE="obs"
-                echo -e "${GREEN}Primary Fallback Mode switched to: $FALLBACK_MODE${NC}"
+            1)
+                if [ "$NOALBS_ENABLED" == "true" ]; then
+                    NOALBS_ENABLED="false"
+                    CLOUD_BRB="false"
+                else
+                    NOALBS_ENABLED="true"
+                    CLOUD_BRB="true"
+                    FALLBACK_MODE="obs"
+                fi
                 save_config
-                sleep 1
                 ;;
-            3) echo -e "Enter OBS WebSocket Host (e.g. 192.168.1.50 or host.docker.internal):"; read -r input; [ -n "$input" ] && { OBS_WS_HOST="$input"; save_config; } ;;
-            4) echo -e "Enter OBS WebSocket Port (Default: 4455):"; read -r input; [ -n "$input" ] && { OBS_WS_PORT="$input"; save_config; } ;;
-            5) echo -e "Enter OBS WebSocket Password:"; read -r input; OBS_WS_PASSWORD="$input"; save_config ;;
-            6) echo -e "Enter OBS Main Scene Name (e.g. 'Main' or 'Streaming'):"; read -r input; [ -n "$input" ] && { OBS_SCENE_LIVE="$input"; save_config; } ;;
-            7) echo -e "Enter OBS BRB Scene Name (e.g. 'BRB' or 'LowBitrate'):"; read -r input; [ -n "$input" ] && { OBS_SCENE_BRB="$input"; save_config; } ;;
-            8) echo -e "Enter Low Bitrate Threshold in kbps (e.g. 1000):"; read -r input; [ -n "$input" ] && { LOW_BITRATE="$input"; save_config; } ;;
-            9) echo -e "Enter Restore Bitrate Threshold in kbps (e.g. 1500):"; read -r input; [ -n "$input" ] && { RESTORE_BITRATE="$input"; save_config; } ;;
-            10) [ "$CLOUD_BRB" == "true" ] && CLOUD_BRB="false" || CLOUD_BRB="true"; save_config ;;
-            11)
-                echo -e "Enter BRB Video URL (Direct MP4 link, or type 'disable'/'clear' to remove):"
+            2)
+                echo -e "Enter Direct .mp4 URL for OBS Browser Source (or type 'default' / 'clear'):"
                 read -r input
-                if [ "$input" == "disable" ] || [ "$input" == "clear" ] || [ "$input" == "DISABLE" ] || [ "$input" == "CLEAR" ]; then
+                if [ "$input" == "clear" ] || [ "$input" == "CLEAR" ]; then
                     BRB_VIDEO_URL=""
                     save_config
-                    rm -f ./data/brb_video.mp4 ./data/brb_video.mp4.tmp
-                    echo -e "${GREEN}Cleared BRB Video URL and removed cached video.${NC}"
+                    echo -e "${GREEN}Cleared BRB Video URL.${NC}"
+                    sleep 1
+                elif [ "$input" == "default" ] || [ "$input" == "DEFAULT" ]; then
+                    BRB_VIDEO_URL="https://filedn.com/lfh40bKbFfD5um9HDFNrJFR/brb.mp4"
+                    save_config
+                    echo -e "${GREEN}BRB Video URL set to default MP4 (direct browser source, no transcoding).${NC}"
                     sleep 1
                 elif [ -n "$input" ]; then
                     BRB_VIDEO_URL="$input"
                     save_config
-                    if [ "$NOALBS_ENABLED" == "true" ] && [ "$CLOUD_BRB" == "true" ]; then
-                        ensure_brb_video_transcoded "$BRB_VIDEO_URL"
-                    fi
+                    echo -e "${GREEN}BRB Video URL updated (direct browser source, no transcoding).${NC}"
                     sleep 1
                 fi
                 ;;
-            12)
-                echo -e "Enter Disconnection Video Protection Duration in seconds (e.g. 300):"
+            3)
+                [ "$BRB_VIDEO_LOOP" == "true" ] && BRB_VIDEO_LOOP="false" || BRB_VIDEO_LOOP="true"
+                echo -e "${GREEN}BRB Video Loop set to: $BRB_VIDEO_LOOP${NC}"
+                save_config
+                sleep 1
+                ;;
+            4)
+                echo -e "Enter seconds to loop BRB video before disconnecting stream (Default: 300):"
                 read -r input
-                if [ -n "$input" ]; then
+                if [[ "$input" =~ ^[0-9]+$ ]] && [ "$input" -gt 0 ]; then
                     CLOUD_BRB_TIMEOUT="$input"
                     save_config
-                    echo -e "${GREEN}Disconnection protection duration updated to $CLOUD_BRB_TIMEOUT seconds.${NC}"
+                    echo -e "${GREEN}Stream disconnect timeout updated to $CLOUD_BRB_TIMEOUT seconds.${NC}"
+                    sleep 1
+                elif [ -n "$input" ]; then
+                    echo -e "${RED}Please enter a valid positive number of seconds.${NC}"
                     sleep 1
                 fi
                 ;;
-            13) break ;;
+            5)
+                echo -e "Enter Low Bitrate Threshold in kbps (switches to '${OBS_SCENE_BRB}' below this, e.g. 1000):"
+                read -r input
+                if [[ "$input" =~ ^[0-9]+$ ]]; then
+                    LOW_BITRATE="$input"
+                    save_config
+                fi
+                ;;
+            6)
+                echo -e "Enter Restore Bitrate Threshold in kbps (switches back to '${OBS_SCENE_LIVE}' above this, e.g. 1500):"
+                read -r input
+                if [[ "$input" =~ ^[0-9]+$ ]]; then
+                    RESTORE_BITRATE="$input"
+                    save_config
+                fi
+                ;;
+            7)
+                echo -e "Enter Main/Live Scene Name (Default: main):"
+                read -r input
+                [ -n "$input" ] && { OBS_SCENE_LIVE="$input"; save_config; }
+                ;;
+            8)
+                echo -e "Enter BRB Scene Name (Default: brb):"
+                read -r input
+                [ -n "$input" ] && { OBS_SCENE_BRB="$input"; save_config; }
+                ;;
+            9)
+                echo -e "Enter Lightweight OBS Output Video Bitrate in kbps (Default: 6000):"
+                read -r input
+                if [[ "$input" =~ ^[0-9]+$ ]] && [ "$input" -ge 500 ]; then
+                    OBS_BRIDGE_BITRATE="$input"
+                    save_config
+                fi
+                ;;
+            10)
+                echo -e "Enter OBS WebSocket Port (Default: 4455):"
+                read -r input
+                if [[ "$input" =~ ^[0-9]+$ ]]; then
+                    OBS_WS_PORT="$input"
+                    save_config
+                fi
+                ;;
+            11)
+                echo -e "Enter OBS WebSocket Password (leave blank to disable auth on local loopback):"
+                read -r input
+                OBS_WS_PASSWORD="$input"
+                save_config
+                ;;
+            12) break ;;
             *) echo -e "${RED}Invalid option${NC}"; sleep 1 ;;
         esac
     done
+}
+
+generate_lightweight_obs_bridge() {
+    local BRIDGE_DIR="$SCRIPT_DIR/obs-bridge"
+    mkdir -p "$BRIDGE_DIR"
+
+    cat << 'DOCKERFILE_EOF' > "$BRIDGE_DIR/Dockerfile"
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV DISPLAY=:99
+ENV LIBGL_ALWAYS_SOFTWARE=1
+ENV MESA_GL_VERSION_OVERRIDE=3.3
+ENV QT_QPA_PLATFORM=xcb
+
+RUN printf 'Acquire::ForceIPv4 "true";\nAcquire::http::Timeout "15";\nAcquire::Retries "2";\n' > /etc/apt/apt.conf.d/99fast \
+    && printf 'deb http://mirrors.edge.kernel.org/ubuntu/ noble main universe\n' > /etc/apt/sources.list \
+    && rm -f /etc/apt/sources.list.d/* \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        libgl1-mesa-dri \
+        libglx-mesa0 \
+        libnginx-mod-rtmp \
+        nginx-light \
+        obs-studio \
+        pulseaudio \
+        python3 \
+        python3-websockets \
+        xvfb \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* \
+    && command -v obs >/dev/null \
+    && find /usr/lib -name "obs-websocket.so" | grep -q .
+
+WORKDIR /opt/obs-bridge
+COPY setup_obs.py noalbs_controller.py brb.html entrypoint.sh /opt/obs-bridge/
+RUN chmod +x /opt/obs-bridge/entrypoint.sh /opt/obs-bridge/setup_obs.py /opt/obs-bridge/noalbs_controller.py
+
+EXPOSE 1935
+ENTRYPOINT ["/opt/obs-bridge/entrypoint.sh"]
+DOCKERFILE_EOF
+
+    cat << 'HTML_EOF' > "$BRIDGE_DIR/brb.html"
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>BRB Stream Protection</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    background: #000000;
+    overflow: hidden;
+  }
+  video {
+    width: 100vw;
+    height: 100vh;
+    object-fit: cover;
+    display: block;
+    background: #000000;
+  }
+  video::-webkit-media-controls {
+    display: none !important;
+  }
+</style>
+</head>
+<body>
+  <video id="brbVideo" autoplay playsinline></video>
+  <script>
+    (function () {
+      const params = new URLSearchParams(window.location.search);
+      const src = params.get("src") || "https://filedn.com/lfh40bKbFfD5um9HDFNrJFR/brb.mp4";
+      const loopParam = (params.get("loop") || "true").toLowerCase();
+      const shouldLoop = loopParam === "true" || loopParam === "1";
+      const video = document.getElementById("brbVideo");
+
+      video.loop = shouldLoop;
+      video.muted = false;
+      video.volume = 1.0;
+      video.src = src;
+
+      video.play().catch(function () {
+        video.muted = true;
+        video.play().catch(function () {});
+      });
+    })();
+  </script>
+</body>
+</html>
+HTML_EOF
+
+    cat << 'SETUP_PY_EOF' > "$BRIDGE_DIR/setup_obs.py"
+#!/usr/bin/env python3
+import configparser
+import glob
+import json
+import os
+import urllib.parse
+
+PORT_RTMP = os.environ.get("PORT_RTMP", "1935")
+APP_NAME = os.environ.get("APP_NAME", "live")
+OBS_KEY = os.environ.get("OBS_KEY", "")
+OBS_WS_PORT = os.environ.get("OBS_WS_PORT", "4455")
+OBS_WS_PASSWORD = os.environ.get("OBS_WS_PASSWORD", "")
+OBS_SCENE_LIVE = os.environ.get("OBS_SCENE_LIVE", "main")
+OBS_SCENE_BRB = os.environ.get("OBS_SCENE_BRB", "brb")
+BRB_VIDEO_URL = os.environ.get("BRB_VIDEO_URL", "https://filedn.com/lfh40bKbFfD5um9HDFNrJFR/brb.mp4")
+BRB_VIDEO_LOOP = os.environ.get("BRB_VIDEO_LOOP", "true")
+OBS_BRIDGE_BITRATE = os.environ.get("OBS_BRIDGE_BITRATE", "6000")
+INTERNAL_RTMP_PORT = os.environ.get("INTERNAL_RTMP_PORT", "19359")
+CHUNK_SIZE = os.environ.get("CHUNK_SIZE", "8192")
+ACCEPTED_IP = os.environ.get("ACCEPTED_IP", "").strip()
+RELAY_HOST = os.environ.get("RELAY_HOST", "127.0.0.1")
+
+obs_root = "/root/.config/obs-studio"
+profile_dir = os.path.join(obs_root, "basic", "profiles", "CookieRTMPS")
+scenes_dir = os.path.join(obs_root, "basic", "scenes")
+os.makedirs(profile_dir, exist_ok=True)
+os.makedirs(scenes_dir, exist_ok=True)
+
+# 1. Global / User INI (disables first-run wizards and configures obs-websocket v5)
+for ini_name in ("global.ini", "user.ini"):
+    cfg = configparser.ConfigParser()
+    cfg.optionxform = str
+    cfg["General"] = {
+        "FirstRun": "false",
+        "EnableAutoUpdates": "false",
+        "ConfirmOnExit": "false",
+    }
+    cfg["Basic"] = {
+        "Profile": "CookieRTMPS",
+        "ProfileDir": "CookieRTMPS",
+        "SceneCollection": "CookieRTMPS",
+        "SceneCollectionFile": "CookieRTMPS",
+    }
+    cfg["BasicWindow"] = {
+        "Migrated": "true",
+    }
+    cfg["OBSWebSocket"] = {
+        "FirstLoad": "false",
+        "ServerEnabled": "true",
+        "ServerPort": str(OBS_WS_PORT),
+        "AuthRequired": "true" if OBS_WS_PASSWORD else "false",
+        "ServerPassword": OBS_WS_PASSWORD,
+        "AlertsEnabled": "false",
+    }
+    with open(os.path.join(obs_root, ini_name), "w", encoding="utf-8") as f:
+        cfg.write(f, space_around_delimiters=False)
+
+# 2. OBS Encoding Profile (1080p, 30fps, 2s keyframe interval, x264 veryfast, 48kHz stereo AAC)
+basic_ini = configparser.ConfigParser()
+basic_ini.optionxform = str
+basic_ini["General"] = {"Name": "CookieRTMPS"}
+basic_ini["Video"] = {
+    "BaseCX": "1920",
+    "BaseCY": "1080",
+    "OutputCX": "1920",
+    "OutputCY": "1080",
+    "FPSType": "0",
+    "FPSCommon": "30",
+}
+basic_ini["Output"] = {"Mode": "Simple"}
+basic_ini["SimpleOutput"] = {
+    "VBitrate": str(OBS_BRIDGE_BITRATE),
+    "ABitrate": "160",
+    "StreamEncoder": "x264",
+    "Preset": "veryfast",
+    "UseAdvanced": "true",
+    "Profile": "main",
+    "KeyframeIntervalSec": "2",
+}
+basic_ini["Audio"] = {
+    "SampleRate": "48000",
+    "ChannelSetup": "Stereo",
+}
+with open(os.path.join(profile_dir, "basic.ini"), "w", encoding="utf-8") as f:
+    basic_ini.write(f, space_around_delimiters=False)
+
+# 3. OBS Output Target -> CookieRTMPS internal relay (ensure non-empty RTMP stream name)
+relay_stream_key = OBS_KEY if OBS_KEY else "cookiertmps"
+service_json = {
+    "type": "rtmp_custom",
+    "settings": {
+        "server": f"rtmp://{RELAY_HOST}:{INTERNAL_RTMP_PORT}/{APP_NAME}",
+        "key": relay_stream_key,
+        "use_auth": False,
+    },
+}
+with open(os.path.join(profile_dir, "service.json"), "w", encoding="utf-8") as f:
+    json.dump(service_json, f, indent=2)
+
+# 4. OBS Scene Collection with 2 scenes: 'main' (RTMP feed) and 'brb' (Full-screen MP4 URL)
+ingest_url = f"rtmp://127.0.0.1:{PORT_RTMP}/{APP_NAME}"
+if OBS_KEY:
+    ingest_url = f"{ingest_url}/{OBS_KEY}"
+
+has_obs_browser = bool(
+    glob.glob("/usr/lib/**/obs-browser.so", recursive=True)
+    or glob.glob("/usr/local/lib/**/obs-browser.so", recursive=True)
+)
+
+encoded_mp4 = urllib.parse.quote(BRB_VIDEO_URL, safe="")
+brb_browser_url = f"http://127.0.0.1:8090/brb.html?src={encoded_mp4}&loop={BRB_VIDEO_LOOP}"
+should_loop = BRB_VIDEO_LOOP.lower() == "true"
+
+if has_obs_browser:
+    brb_source_def = {
+        "prev_ver": 503316480,
+        "name": "BRB_Browser_Source",
+        "uuid": "44444444-4444-4444-8444-444444444444",
+        "id": "browser_source",
+        "versioned_id": "browser_source",
+        "settings": {
+            "url": brb_browser_url,
+            "width": 1920,
+            "height": 1080,
+            "fps": 30,
+            "reroute_audio": True,
+            "restart_when_active": True,
+            "shutdown": False,
+        },
+        "mixers": 255,
+        "sync": 0,
+        "flags": 0,
+        "volume": 1.0,
+        "balance": 0.5,
+        "enabled": True,
+        "muted": False,
+        "push-to-mute": False,
+        "push-to-mute-delay": 0,
+        "push-to-talk": False,
+        "push-to-talk-delay": 0,
+        "hotkeys": {},
+        "deinterlace_mode": 0,
+        "deinterlace_field_order": 0,
+        "monitoring_type": 0,
+        "private_settings": {},
+    }
+else:
+    brb_source_def = {
+        "prev_ver": 503316480,
+        "name": "BRB_Browser_Source",
+        "uuid": "44444444-4444-4444-8444-444444444444",
+        "id": "ffmpeg_source",
+        "versioned_id": "ffmpeg_source",
+        "settings": {
+            "is_local_file": False,
+            "input": BRB_VIDEO_URL,
+            "looping": should_loop,
+            "restart_on_activate": True,
+            "clear_on_media_end": False,
+            "reconnect_delay_sec": 2,
+            "hw_decode": False,
+        },
+        "mixers": 255,
+        "sync": 0,
+        "flags": 0,
+        "volume": 1.0,
+        "balance": 0.5,
+        "enabled": True,
+        "muted": False,
+        "push-to-mute": False,
+        "push-to-mute-delay": 0,
+        "push-to-talk": False,
+        "push-to-talk-delay": 0,
+        "hotkeys": {},
+        "deinterlace_mode": 0,
+        "deinterlace_field_order": 0,
+        "monitoring_type": 0,
+        "private_settings": {},
+    }
+
+def make_scene_item(item_id, name, source_uuid):
+    return {
+        "name": name,
+        "source_uuid": source_uuid,
+        "visible": True,
+        "locked": False,
+        "rot": 0.0,
+        "pos": {"x": 0.0, "y": 0.0},
+        "scale": {"x": 1.0, "y": 1.0},
+        "align": 5,
+        "bounds_type": 2,
+        "bounds_align": 0,
+        "bounds": {"x": 1920.0, "y": 1080.0},
+        "crop_left": 0,
+        "crop_top": 0,
+        "crop_right": 0,
+        "crop_bottom": 0,
+        "id": item_id,
+        "group_item_backup": False,
+        "scale_filter": "disable",
+        "blend_method": "default",
+        "blend_type": "normal",
+        "show_transition": {"duration": 0},
+        "hide_transition": {"duration": 0},
+        "private_settings": {},
+    }
+
+scene_collection = {
+    "current_scene": OBS_SCENE_LIVE,
+    "current_program_scene": OBS_SCENE_LIVE,
+    "scene_order": [
+        {"name": OBS_SCENE_LIVE},
+        {"name": OBS_SCENE_BRB},
+    ],
+    "name": "CookieRTMPS",
+    "sources": [
+        {
+            "prev_ver": 503316480,
+            "name": OBS_SCENE_LIVE,
+            "uuid": "11111111-1111-4111-8111-111111111111",
+            "id": "scene",
+            "versioned_id": "scene",
+            "settings": {
+                "id_counter": 1,
+                "custom_size": False,
+                "items": [
+                    make_scene_item(1, "RTMP_Ingest_Source", "22222222-2222-4222-8222-222222222222")
+                ],
+            },
+            "mixers": 0,
+            "sync": 0,
+            "flags": 0,
+            "volume": 1.0,
+            "balance": 0.5,
+            "enabled": True,
+            "muted": False,
+            "push-to-mute": False,
+            "push-to-mute-delay": 0,
+            "push-to-talk": False,
+            "push-to-talk-delay": 0,
+            "hotkeys": {},
+            "deinterlace_mode": 0,
+            "deinterlace_field_order": 0,
+            "monitoring_type": 0,
+            "private_settings": {},
+        },
+        {
+            "prev_ver": 503316480,
+            "name": "RTMP_Ingest_Source",
+            "uuid": "22222222-2222-4222-8222-222222222222",
+            "id": "ffmpeg_source",
+            "versioned_id": "ffmpeg_source",
+            "settings": {
+                "is_local_file": False,
+                "input": ingest_url,
+                "input_format": "flv",
+                "buffering_mb": 1,
+                "reconnect_delay_sec": 1,
+                "restart_on_activate": True,
+                "clear_on_media_end": False,
+                "hw_decode": False,
+            },
+            "mixers": 255,
+            "sync": 0,
+            "flags": 0,
+            "volume": 1.0,
+            "balance": 0.5,
+            "enabled": True,
+            "muted": False,
+            "push-to-mute": False,
+            "push-to-mute-delay": 0,
+            "push-to-talk": False,
+            "push-to-talk-delay": 0,
+            "hotkeys": {},
+            "deinterlace_mode": 0,
+            "deinterlace_field_order": 0,
+            "monitoring_type": 0,
+            "private_settings": {},
+        },
+        {
+            "prev_ver": 503316480,
+            "name": OBS_SCENE_BRB,
+            "uuid": "33333333-3333-4333-8333-333333333333",
+            "id": "scene",
+            "versioned_id": "scene",
+            "settings": {
+                "id_counter": 1,
+                "custom_size": False,
+                "items": [
+                    make_scene_item(1, "BRB_Browser_Source", "44444444-4444-4444-8444-444444444444")
+                ],
+            },
+            "mixers": 0,
+            "sync": 0,
+            "flags": 0,
+            "volume": 1.0,
+            "balance": 0.5,
+            "enabled": True,
+            "muted": False,
+            "push-to-mute": False,
+            "push-to-mute-delay": 0,
+            "push-to-talk": False,
+            "push-to-talk-delay": 0,
+            "hotkeys": {},
+            "deinterlace_mode": 0,
+            "deinterlace_field_order": 0,
+            "monitoring_type": 0,
+            "private_settings": {},
+        },
+        brb_source_def,
+    ],
+}
+with open(os.path.join(scenes_dir, "CookieRTMPS.json"), "w", encoding="utf-8") as f:
+    json.dump(scene_collection, f, indent=2)
+
+# 5. Local Nginx-RTMP Ingest Receiver (notify_method get ensures $arg_name matches OBS_KEY)
+allow_rules = "            allow publish 127.0.0.1;\n"
+ip_entries = [ip.strip() for ip in ACCEPTED_IP.replace(",", " ").split() if ip.strip()]
+if ip_entries:
+    if RELAY_HOST != "127.0.0.1":
+        allow_rules += "            allow publish 172.16.0.0/12;\n"
+    for ip_entry in ip_entries:
+        allow_rules += f"            allow publish {ip_entry};\n"
+    allow_rules += "            deny publish all;\n"
+else:
+    allow_rules += "            allow publish all;\n"
+
+on_publish_directive = ""
+if OBS_KEY:
+    on_publish_directive = (
+        "            notify_method get;\n"
+        "            on_publish http://127.0.0.1:8090/auth;\n"
+    )
+
+nginx_conf = f"""load_module modules/ngx_rtmp_module.so;
+worker_processes 1;
+events {{
+    worker_connections 1024;
+}}
+
+rtmp {{
+    server {{
+        listen {PORT_RTMP};
+        chunk_size {CHUNK_SIZE};
+
+        application {APP_NAME} {{
+            live on;
+            record off;
+            meta copy;
+{allow_rules}{on_publish_directive}            allow play 127.0.0.1;
+            deny play all;
+        }}
+
+        application vertical {{
+            live on;
+            record off;
+            meta copy;
+{allow_rules}{on_publish_directive}            push rtmp://{RELAY_HOST}:{INTERNAL_RTMP_PORT}/vertical;
+        }}
+    }}
+}}
+
+http {{
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+    access_log off;
+
+    server {{
+        listen 127.0.0.1:8090;
+
+        location /stat {{
+            rtmp_stat all;
+        }}
+
+        location /control {{
+            rtmp_control all;
+        }}
+
+        location /auth {{
+            if ($arg_name = "{OBS_KEY}") {{
+                return 200 "OK";
+            }}
+            return 403 "Forbidden";
+        }}
+
+        location = /brb.html {{
+            alias /opt/obs-bridge/brb.html;
+        }}
+    }}
+}}
+"""
+with open("/etc/nginx/nginx.conf", "w", encoding="utf-8") as f:
+    f.write(nginx_conf)
+SETUP_PY_EOF
+
+    cat << 'CONTROLLER_PY_EOF' > "$BRIDGE_DIR/noalbs_controller.py"
+#!/usr/bin/env python3
+import asyncio
+import base64
+import hashlib
+import json
+import os
+import time
+import urllib.request
+import uuid
+import xml.etree.ElementTree as ET
+import websockets
+
+PORT_RTMP = os.environ.get("PORT_RTMP", "1935")
+APP_NAME = os.environ.get("APP_NAME", "live")
+OBS_KEY = os.environ.get("OBS_KEY", "")
+OBS_WS_HOST = os.environ.get("OBS_WS_HOST", "127.0.0.1")
+OBS_WS_PORT = int(os.environ.get("OBS_WS_PORT", "4455"))
+OBS_WS_PASSWORD = os.environ.get("OBS_WS_PASSWORD", "")
+OBS_SCENE_LIVE = os.environ.get("OBS_SCENE_LIVE", "main")
+OBS_SCENE_BRB = os.environ.get("OBS_SCENE_BRB", "brb")
+LOW_BITRATE = float(os.environ.get("LOW_BITRATE", "1000"))
+RESTORE_BITRATE = float(os.environ.get("RESTORE_BITRATE", "1500"))
+BRB_VIDEO_LOOP = os.environ.get("BRB_VIDEO_LOOP", "true").lower() == "true"
+CLOUD_BRB_TIMEOUT = int(os.environ.get("CLOUD_BRB_TIMEOUT", "300"))
+
+
+def get_ingest_stats():
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:8090/stat", timeout=1.5) as resp:
+            xml_data = resp.read()
+        root = ET.fromstring(xml_data)
+        for app in root.findall(".//application"):
+            name_el = app.find("name")
+            if name_el is not None and name_el.text == APP_NAME:
+                live = app.find("live")
+                if live is None:
+                    return False, 0.0, ""
+                for stream in live.findall("stream"):
+                    publishing = stream.find("publishing")
+                    if publishing is not None:
+                        bw_el = stream.find("bw_in")
+                        sname_el = stream.find("name")
+                        bw_bps = float(bw_el.text) if (bw_el is not None and bw_el.text) else 0.0
+                        sname = sname_el.text.strip() if (sname_el is not None and sname_el.text) else ""
+                        return True, bw_bps / 1000.0, sname
+        return False, 0.0, ""
+    except Exception:
+        return False, 0.0, ""
+
+
+def drop_ingest_publisher():
+    try:
+        url = f"http://127.0.0.1:8090/control/drop/publisher?app={APP_NAME}"
+        urllib.request.urlopen(url, timeout=1.5).read()
+    except Exception:
+        pass
+
+
+class OBSClient:
+    def __init__(self, host, port, password):
+        self.uri = f"ws://{host}:{port}"
+        self.password = password
+        self.ws = None
+
+    async def connect(self):
+        self.ws = await websockets.connect(self.uri, ping_interval=20, ping_timeout=20)
+        hello_raw = await self.ws.recv()
+        hello = json.loads(hello_raw)
+        auth_obj = hello.get("d", {}).get("authentication")
+        identify_d = {"rpcVersion": 1}
+        if auth_obj and self.password:
+            secret_hash = hashlib.sha256((self.password + auth_obj["salt"]).encode("utf-8")).digest()
+            secret = base64.b64encode(secret_hash).decode("utf-8")
+            auth_hash = hashlib.sha256((secret + auth_obj["challenge"]).encode("utf-8")).digest()
+            identify_d["authentication"] = base64.b64encode(auth_hash).decode("utf-8")
+        await self.ws.send(json.dumps({"op": 1, "d": identify_d}))
+        identified_raw = await self.ws.recv()
+        identified = json.loads(identified_raw)
+        if identified.get("op") != 2:
+            raise RuntimeError(f"OBS WebSocket identify failed: {identified}")
+
+    async def call(self, request_type, request_data=None):
+        req_id = str(uuid.uuid4())
+        payload = {
+            "op": 6,
+            "d": {
+                "requestType": request_type,
+                "requestId": req_id,
+            },
+        }
+        if request_data is not None:
+            payload["d"]["requestData"] = request_data
+        await self.ws.send(json.dumps(payload))
+        while True:
+            msg = json.loads(await self.ws.recv())
+            if msg.get("op") == 7 and msg.get("d", {}).get("requestId") == req_id:
+                return msg.get("d", {})
+
+    async def set_scene(self, scene_name):
+        await self.call("SetCurrentProgramScene", {"sceneName": scene_name})
+
+    async def start_stream(self):
+        await self.call("StartStream")
+
+    async def stop_stream(self):
+        await self.call("StopStream")
+
+    async def restart_rtmp_source(self, active_stream_name):
+        target_url = f"rtmp://127.0.0.1:{PORT_RTMP}/{APP_NAME}"
+        if active_stream_name:
+            target_url = f"{target_url}/{active_stream_name}"
+        elif OBS_KEY:
+            target_url = f"{target_url}/{OBS_KEY}"
+        await self.call(
+            "SetInputSettings",
+            {
+                "inputName": "RTMP_Ingest_Source",
+                "inputSettings": {"input": target_url},
+                "overlay": True,
+            },
+        )
+        await self.call(
+            "TriggerMediaInputAction",
+            {
+                "inputName": "RTMP_Ingest_Source",
+                "mediaAction": "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_RESTART",
+            },
+        )
+
+    async def refresh_brb_source(self):
+        try:
+            await self.call(
+                "PressInputPropertiesButton",
+                {
+                    "inputName": "BRB_Browser_Source",
+                    "propertyName": "refreshnocache",
+                },
+            )
+        except Exception:
+            pass
+        try:
+            await self.call(
+                "TriggerMediaInputAction",
+                {
+                    "inputName": "BRB_Browser_Source",
+                    "mediaAction": "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_RESTART",
+                },
+            )
+        except Exception:
+            pass
+
+
+async def run_controller():
+    obs = OBSClient(OBS_WS_HOST, OBS_WS_PORT, OBS_WS_PASSWORD)
+    while True:
+        try:
+            await obs.connect()
+            print(
+                f"[NOALBS] Connected to Lightweight OBS WebSocket. "
+                f"Live='{OBS_SCENE_LIVE}', BRB='{OBS_SCENE_BRB}', "
+                f"Low=<{LOW_BITRATE}kbps, Restore>={RESTORE_BITRATE}kbps, "
+                f"Loop={BRB_VIDEO_LOOP}, Timeout={CLOUD_BRB_TIMEOUT}s",
+                flush=True,
+            )
+            break
+        except Exception as exc:
+            print(f"[NOALBS] Waiting for OBS WebSocket ({exc})...", flush=True)
+            await asyncio.sleep(2)
+
+    state = "IDLE"  # IDLE -> LIVE <-> BRB -> IDLE
+    low_streak = 0
+    restore_streak = 0
+    brb_started_at = None
+
+    while True:
+        try:
+            publishing, kbps, active_name = get_ingest_stats()
+
+            if state == "IDLE":
+                if publishing and kbps > 50:
+                    print(f"[NOALBS] Live ingest detected ({kbps:.0f} kbps). Switching to '{OBS_SCENE_LIVE}' and starting stream...", flush=True)
+                    await obs.restart_rtmp_source(active_name)
+                    await obs.set_scene(OBS_SCENE_LIVE)
+                    await obs.start_stream()
+                    state = "LIVE"
+                    low_streak = 0
+                    restore_streak = 0
+                    brb_started_at = None
+
+            elif state == "LIVE":
+                if (not publishing) or (kbps < LOW_BITRATE):
+                    low_streak += 1
+                    if low_streak >= 3:
+                        print(
+                            f"[NOALBS] Bitrate dropped ({kbps:.0f} kbps < {LOW_BITRATE:.0f} kbps). "
+                            f"Switching to '{OBS_SCENE_BRB}' (loop={BRB_VIDEO_LOOP}, timeout={CLOUD_BRB_TIMEOUT}s).",
+                            flush=True,
+                        )
+                        await obs.refresh_brb_source()
+                        await obs.set_scene(OBS_SCENE_BRB)
+                        state = "BRB"
+                        brb_started_at = time.monotonic()
+                        restore_streak = 0
+                else:
+                    low_streak = 0
+
+            elif state == "BRB":
+                elapsed = time.monotonic() - (brb_started_at or time.monotonic())
+                if publishing and kbps >= RESTORE_BITRATE:
+                    restore_streak += 1
+                    if restore_streak >= 3:
+                        print(
+                            f"[NOALBS] Connection restored ({kbps:.0f} kbps >= {RESTORE_BITRATE:.0f} kbps). "
+                            f"Switching back to '{OBS_SCENE_LIVE}'.",
+                            flush=True,
+                        )
+                        await obs.restart_rtmp_source(active_name)
+                        await obs.set_scene(OBS_SCENE_LIVE)
+                        state = "LIVE"
+                        low_streak = 0
+                        restore_streak = 0
+                        brb_started_at = None
+                else:
+                    restore_streak = 0
+                    if elapsed >= CLOUD_BRB_TIMEOUT:
+                        print(
+                            f"[NOALBS] Disconnection timeout ({CLOUD_BRB_TIMEOUT}s) reached. "
+                            f"Disconnecting stream and returning to IDLE.",
+                            flush=True,
+                        )
+                        await obs.stop_stream()
+                        drop_ingest_publisher()
+                        await obs.set_scene(OBS_SCENE_LIVE)
+                        state = "IDLE"
+                        low_streak = 0
+                        restore_streak = 0
+                        brb_started_at = None
+
+        except Exception as exc:
+            print(f"[NOALBS] Controller warning: {exc}. Reconnecting OBS WebSocket...", flush=True)
+            await asyncio.sleep(2)
+            try:
+                await obs.connect()
+            except Exception:
+                pass
+
+        await asyncio.sleep(1.0)
+
+
+if __name__ == "__main__":
+    asyncio.run(run_controller())
+CONTROLLER_PY_EOF
+
+    cat << 'ENTRYPOINT_EOF' > "$BRIDGE_DIR/entrypoint.sh"
+#!/bin/bash
+set -e
+
+export XDG_RUNTIME_DIR=/tmp/runtime-root
+mkdir -p "$XDG_RUNTIME_DIR"
+chmod 700 "$XDG_RUNTIME_DIR"
+
+python3 /opt/obs-bridge/setup_obs.py
+
+# Start Nginx-RTMP Ingest Receiver
+nginx
+
+# Start Virtual Display (Xvfb) & Virtual Audio Sink (PulseAudio)
+rm -f /tmp/.X99-lock /tmp/.X11-unix/X99
+Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset >/tmp/xvfb.log 2>&1 &
+sleep 1
+
+pulseaudio --start --exit-idle-time=-1 --log-target=file:/tmp/pulse.log 2>/dev/null || true
+pactl load-module module-null-sink sink_name=obs_virtual_sink sink_properties=device.description="OBS_Virtual_Audio" >/dev/null 2>&1 || true
+pactl set-default-sink obs_virtual_sink >/dev/null 2>&1 || true
+
+# Launch Lightweight Headless OBS with preconfigured 'main' & 'brb' scenes
+obs --profile CookieRTMPS --collection CookieRTMPS --disable-shutdown-check >/tmp/obs.log 2>&1 &
+
+# Wait up to 15s for OBS WebSocket to bind before starting controller
+OBS_WS_PORT_VAL="${OBS_WS_PORT:-4455}"
+for _ in $(seq 1 30); do
+    if python3 -c "import socket; s=socket.create_connection(('127.0.0.1', int('$OBS_WS_PORT_VAL')), 0.5); s.close()" 2>/dev/null; then
+        break
+    fi
+    sleep 0.5
+done
+
+# Start NOALBS Bitrate Monitor & Automatic Scene Switcher
+exec python3 /opt/obs-bridge/noalbs_controller.py
+ENTRYPOINT_EOF
+
+    chmod +x "$BRIDGE_DIR/entrypoint.sh" "$BRIDGE_DIR/setup_obs.py" "$BRIDGE_DIR/noalbs_controller.py"
+}
+
+run_full_integration_tests() {
+    echo ""
+    echo -e "${GREEN}=================================================${NC}"
+    echo -e "${GREEN}  CookieRTMPS & Lightweight OBS Integration Test ${NC}"
+    echo -e "${GREEN}=================================================${NC}"
+
+    local PASS_COUNT=0
+    local FAIL_COUNT=0
+    local WARN_COUNT=0
+
+    record_pass() {
+        echo -e "  [${GREEN}PASS${NC}] $1"
+        PASS_COUNT=$((PASS_COUNT + 1))
+    }
+
+    record_fail() {
+        echo -e "  [${RED}FAIL${NC}] $1"
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+    }
+
+    record_warn() {
+        echo -e "  [${YELLOW}WARN${NC}] $1"
+        WARN_COUNT=$((WARN_COUNT + 1))
+    }
+
+    if ! command -v docker &> /dev/null; then
+        record_fail "Docker CLI not found."
+        return 1
+    fi
+
+    # 1. Core CookieRTMPS Relay Container Checks
+    echo -e "${CYAN}--- 1. Core RTMP/RTMPS Relay Checks ---${NC}"
+    if docker ps --format '{{.Names}}' | grep -qx "cookie-rtmps"; then
+        record_pass "Container 'cookie-rtmps' is running."
+    else
+        record_fail "Container 'cookie-rtmps' is NOT running."
+    fi
+
+    # Wait up to 15s for cookie-rtmps entrypoint to finish apt/setup and start nginx & stunnel
+    for _ in $(seq 1 30); do
+        if docker exec cookie-rtmps pgrep -f "nginx" >/dev/null 2>&1; then
+            break
+        fi
+        sleep 0.5
+    done
+
+    if docker exec cookie-rtmps pgrep -f "nginx" >/dev/null 2>&1; then
+        record_pass "Nginx-RTMP relay daemon is active inside 'cookie-rtmps'."
+    else
+        record_fail "Nginx-RTMP relay daemon is not running inside 'cookie-rtmps'."
+    fi
+
+    if docker exec cookie-rtmps nginx -t >/dev/null 2>&1; then
+        record_pass "Nginx configuration syntax inside 'cookie-rtmps' is valid."
+    else
+        record_fail "Nginx configuration syntax check failed inside 'cookie-rtmps'."
+    fi
+
+    if docker exec cookie-rtmps pgrep -f "stunnel" >/dev/null 2>&1; then
+        record_pass "Stunnel RTMPS TLS bridge is running."
+    else
+        record_warn "Stunnel process not active (normal if only plain rtmp:// targets are configured)."
+    fi
+
+    local EXPECTED_RELAY_PORT="$PORT_RTMP"
+    [ "$NOALBS_ENABLED" == "true" ] && EXPECTED_RELAY_PORT="$INTERNAL_RTMP_PORT"
+    if python3 -c "import socket; s=socket.create_connection(('127.0.0.1', int('$EXPECTED_RELAY_PORT')), 2); s.close()" 2>/dev/null; then
+        record_pass "CookieRTMPS RTMP port ${EXPECTED_RELAY_PORT} is accepting TCP connections."
+    else
+        record_fail "CookieRTMPS RTMP port ${EXPECTED_RELAY_PORT} is not reachable."
+    fi
+
+    # 2. WireGuard & IP Whitelist Checks
+    echo -e "${CYAN}--- 2. IP Whitelist & WireGuard Checks ---${NC}"
+    if [ -n "$ACCEPTED_IP" ]; then
+        record_pass "IP Whitelist configured: ${ACCEPTED_IP}"
+        local TARGET_NGINX_CONTAINER="cookie-rtmps"
+        [ "$NOALBS_ENABLED" == "true" ] && TARGET_NGINX_CONTAINER="cookie-rtmps-obs"
+        local missing_ips=""
+        for ip_entry in $ACCEPTED_IP; do
+            if ! docker exec "$TARGET_NGINX_CONTAINER" grep -Fq "allow publish ${ip_entry};" /etc/nginx/nginx.conf 2>/dev/null; then
+                missing_ips="$missing_ips $ip_entry"
+            fi
+        done
+        if [ -z "$missing_ips" ]; then
+            record_pass "All whitelisted IPs/WireGuard subnets are loaded in ${TARGET_NGINX_CONTAINER} nginx.conf."
+        else
+            record_fail "Missing whitelist rules in ${TARGET_NGINX_CONTAINER} for:${missing_ips}"
+        fi
+    else
+        record_pass "IP Whitelist is open (all source IPs allowed)."
+    fi
+
+    # 3. Lightweight OBS Disconnection Protection & Client Handshake Checks
+    if [ "$NOALBS_ENABLED" == "true" ]; then
+        echo -e "${CYAN}--- 3. Lightweight OBS & Disconnection Protection Checks ---${NC}"
+        if docker ps --format '{{.Names}}' | grep -qx "cookie-rtmps-obs"; then
+            record_pass "Container 'cookie-rtmps-obs' is running."
+        else
+            record_fail "Container 'cookie-rtmps-obs' is NOT running."
+        fi
+
+        if docker exec cookie-rtmps-obs nginx -t >/dev/null 2>&1; then
+            record_pass "Nginx-RTMP ingest config inside 'cookie-rtmps-obs' is valid."
+        else
+            record_fail "Nginx-RTMP ingest config syntax check failed inside 'cookie-rtmps-obs'."
+        fi
+
+        if python3 -c "
+import socket
+s = socket.create_connection(('127.0.0.1', int('$PORT_RTMP')), 2)
+c1 = b'\x03' + b'\x00' * 1536
+s.sendall(c1)
+s0 = s.recv(1)
+assert s0 == b'\x03', f'Expected RTMP version 3, got {s0}'
+s.close()
+" 2>/dev/null; then
+            record_pass "Public RTMP ingest port ${PORT_RTMP} completed RTMP C0/S0 handshake."
+        else
+            record_fail "Public RTMP ingest port ${PORT_RTMP} failed RTMP handshake."
+        fi
+
+        if [ -n "$OBS_KEY" ]; then
+            local AUTH_HTTP_CODE
+            AUTH_HTTP_CODE=$(docker exec cookie-rtmps-obs curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:8090/auth?name=${OBS_KEY}" 2>/dev/null || echo "000")
+            if [ "$AUTH_HTTP_CODE" == "200" ]; then
+                record_pass "Stream key /auth endpoint verified (HTTP 200 for configured OBS_KEY)."
+            else
+                record_fail "Stream key /auth endpoint returned HTTP ${AUTH_HTTP_CODE} instead of 200."
+            fi
+        fi
+
+        if docker exec cookie-rtmps-obs pgrep -x Xvfb >/dev/null 2>&1; then
+            record_pass "Headless virtual display (Xvfb :99) is running."
+        else
+            record_fail "Xvfb virtual display is not running in 'cookie-rtmps-obs'."
+        fi
+
+        if docker exec cookie-rtmps-obs pgrep -x obs >/dev/null 2>&1; then
+            record_pass "Lightweight OBS Studio process is running."
+        else
+            local OBS_ERR_TAIL
+            OBS_ERR_TAIL=$(docker exec cookie-rtmps-obs tail -n 5 /tmp/obs.log 2>/dev/null | tr '\n' ' ')
+            record_fail "OBS Studio process is not running in 'cookie-rtmps-obs' (${OBS_ERR_TAIL})."
+        fi
+
+        if docker exec cookie-rtmps-obs pgrep -f noalbs_controller.py >/dev/null 2>&1; then
+            record_pass "NOALBS bitrate monitor & scene switcher is running."
+        else
+            record_fail "NOALBS controller process is not running in 'cookie-rtmps-obs'."
+        fi
+
+        if docker exec cookie-rtmps-obs curl -fsS http://127.0.0.1:8090/stat >/dev/null 2>&1; then
+            record_pass "Local Nginx-RTMP /stat endpoint is serving XML telemetry."
+        else
+            record_fail "Local Nginx-RTMP /stat endpoint failed."
+        fi
+
+        if docker exec cookie-rtmps-obs curl -fsS "http://127.0.0.1:8090/brb.html" | grep -q "brbVideo"; then
+            record_pass "BRB Browser Source HTML wrapper is serving on 127.0.0.1:8090."
+        else
+            record_fail "BRB Browser Source HTML wrapper failed to load."
+        fi
+
+        if [ -n "$BRB_VIDEO_URL" ]; then
+            if curl -fsSIL --max-time 6 "$BRB_VIDEO_URL" >/dev/null 2>&1; then
+                record_pass "Remote BRB MP4 URL is reachable (${BRB_VIDEO_URL})."
+            else
+                record_warn "Remote BRB MP4 URL could not be verified via HEAD request (${BRB_VIDEO_URL})."
+            fi
+        fi
+
+        # Live OBS WebSocket v5 API & Scene Verification
+        local OBS_TEST_OUTPUT
+        OBS_TEST_OUTPUT=$(docker exec cookie-rtmps-obs python3 - << 'PY_OBS_TEST' 2>&1
+import asyncio
+import base64
+import hashlib
+import json
+import os
+import urllib.request
+import uuid
+import xml.etree.ElementTree as ET
+import websockets
+
+ws_port = int(os.environ.get("OBS_WS_PORT", "4455"))
+ws_pass = os.environ.get("OBS_WS_PASSWORD", "")
+scene_live = os.environ.get("OBS_SCENE_LIVE", "main")
+scene_brb = os.environ.get("OBS_SCENE_BRB", "brb")
+app_name = os.environ.get("APP_NAME", "live")
+internal_port = os.environ.get("INTERNAL_RTMP_PORT", "19359")
+
+def is_live_publishing():
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:8090/stat", timeout=1.5) as resp:
+            root = ET.fromstring(resp.read())
+        for app in root.findall(".//application"):
+            name_el = app.find("name")
+            if name_el is not None and name_el.text == app_name:
+                for stream in app.findall(".//stream"):
+                    if stream.find("publishing") is not None:
+                        return True
+    except Exception:
+        pass
+    return False
+
+async def main():
+    async with websockets.connect(f"ws://127.0.0.1:{ws_port}", ping_interval=None) as ws:
+        hello = json.loads(await ws.recv())
+        auth = hello.get("d", {}).get("authentication")
+        ident = {"rpcVersion": 1}
+        if auth and ws_pass:
+            s = base64.b64encode(hashlib.sha256((ws_pass + auth["salt"]).encode()).digest()).decode()
+            a = base64.b64encode(hashlib.sha256((s + auth["challenge"]).encode()).digest()).decode()
+            ident["authentication"] = a
+        await ws.send(json.dumps({"op": 1, "d": ident}))
+        res = json.loads(await ws.recv())
+        assert res.get("op") == 2, f"Auth failed: {res}"
+        print("OK:OBS_WS_AUTH")
+
+        async def call(req, data=None):
+            rid = str(uuid.uuid4())
+            msg = {"op": 6, "d": {"requestType": req, "requestId": rid}}
+            if data is not None:
+                msg["d"]["requestData"] = data
+            await ws.send(json.dumps(msg))
+            while True:
+                r = json.loads(await ws.recv())
+                if r.get("op") == 7 and r.get("d", {}).get("requestId") == rid:
+                    assert r["d"]["requestStatus"]["result"], f"{req} failed: {r}"
+                    return r["d"].get("responseData", {})
+
+        scenes_data = await call("GetSceneList")
+        scene_names = [s["sceneName"] for s in scenes_data.get("scenes", [])]
+        assert scene_live in scene_names, f"Missing live scene '{scene_live}' in {scene_names}"
+        assert scene_brb in scene_names, f"Missing brb scene '{scene_brb}' in {scene_names}"
+        print(f"OK:SCENES_VERIFIED:{scene_live},{scene_brb}")
+
+        main_items = await call("GetSceneItemList", {"sceneName": scene_live})
+        main_sources = [i["sourceName"] for i in main_items.get("sceneItems", [])]
+        assert "RTMP_Ingest_Source" in main_sources, f"Missing RTMP_Ingest_Source in {main_sources}"
+        print("OK:MAIN_SOURCE_VERIFIED")
+
+        brb_items = await call("GetSceneItemList", {"sceneName": scene_brb})
+        brb_sources = [i["sourceName"] for i in brb_items.get("sceneItems", [])]
+        assert "BRB_Browser_Source" in brb_sources, f"Missing BRB_Browser_Source in {brb_sources}"
+        print("OK:BRB_SOURCE_VERIFIED")
+
+        svc = await call("GetStreamServiceSettings")
+        server_url = svc.get("streamServiceSettings", {}).get("server", "")
+        assert f":{internal_port}/{app_name}" in server_url, f"Unexpected OBS output server: {server_url}"
+        print(f"OK:OBS_OUTPUT_RELAY:{server_url}")
+
+        if not is_live_publishing():
+            await call("SetCurrentProgramScene", {"sceneName": scene_brb})
+            cur1 = (await call("GetCurrentProgramScene")).get("currentProgramSceneName")
+            assert cur1 == scene_brb, f"Expected '{scene_brb}', got '{cur1}'"
+            await call("SetCurrentProgramScene", {"sceneName": scene_live})
+            cur2 = (await call("GetCurrentProgramScene")).get("currentProgramSceneName")
+            assert cur2 == scene_live, f"Expected '{scene_live}', got '{cur2}'"
+            print("OK:SCENE_SWITCH_ROUNDTRIP")
+        else:
+            print("SKIP:LIVE_STREAM_ACTIVE")
+
+asyncio.run(main())
+PY_OBS_TEST
+        )
+
+        if echo "$OBS_TEST_OUTPUT" | grep -q "OK:OBS_WS_AUTH"; then
+            record_pass "OBS WebSocket v5 connected and authenticated on port ${OBS_WS_PORT}."
+        else
+            record_fail "OBS WebSocket v5 connection failed: ${OBS_TEST_OUTPUT}"
+        fi
+
+        if echo "$OBS_TEST_OUTPUT" | grep -q "OK:SCENES_VERIFIED"; then
+            record_pass "OBS scenes '${OBS_SCENE_LIVE}' and '${OBS_SCENE_BRB}' verified."
+        else
+            record_fail "OBS scene verification failed."
+        fi
+
+        if echo "$OBS_TEST_OUTPUT" | grep -q "OK:MAIN_SOURCE_VERIFIED"; then
+            record_pass "Scene '${OBS_SCENE_LIVE}' contains full-screen RTMP_Ingest_Source."
+        else
+            record_fail "Scene '${OBS_SCENE_LIVE}' missing RTMP_Ingest_Source."
+        fi
+
+        if echo "$OBS_TEST_OUTPUT" | grep -q "OK:BRB_SOURCE_VERIFIED"; then
+            record_pass "Scene '${OBS_SCENE_BRB}' contains full-screen BRB_Browser_Source (Loop=${BRB_VIDEO_LOOP}, Timeout=${CLOUD_BRB_TIMEOUT}s)."
+        else
+            record_fail "Scene '${OBS_SCENE_BRB}' missing BRB_Browser_Source."
+        fi
+
+        if echo "$OBS_TEST_OUTPUT" | grep -q "OK:OBS_OUTPUT_RELAY"; then
+            record_pass "OBS output target properly chained into CookieRTMPS relay."
+        else
+            record_fail "OBS output target verification failed."
+        fi
+
+        if echo "$OBS_TEST_OUTPUT" | grep -q "OK:SCENE_SWITCH_ROUNDTRIP"; then
+            record_pass "OBS WebSocket scene-switch dry-run ('${OBS_SCENE_LIVE}' -> '${OBS_SCENE_BRB}' -> '${OBS_SCENE_LIVE}') succeeded."
+        elif echo "$OBS_TEST_OUTPUT" | grep -q "SKIP:LIVE_STREAM_ACTIVE"; then
+            record_warn "Skipped live scene-switch test because a live stream is currently active."
+        else
+            record_fail "OBS WebSocket scene-switch roundtrip failed."
+        fi
+    else
+        record_warn "Disconnection Protection (Lightweight OBS) is DISABLED — enable Option 8 -> 1 to deploy 'cookie-rtmps-obs'."
+    fi
+
+    # 4. Run Repository integration_test.sh if present
+    if [ -f "./integration_test.sh" ]; then
+        echo -e "${CYAN}--- 4. Running Repository integration_test.sh ---${NC}"
+        chmod +x ./integration_test.sh
+        if ./integration_test.sh; then
+            record_pass "Repository ./integration_test.sh completed successfully."
+        else
+            record_warn "Repository ./integration_test.sh returned non-zero status (check output above)."
+        fi
+    fi
+
+    echo ""
+    echo -e "${GREEN}=================================================${NC}"
+    echo -e "  Integration Test Summary: ${GREEN}${PASS_COUNT} Passed${NC}, ${RED}${FAIL_COUNT} Failed${NC}, ${YELLOW}${WARN_COUNT} Warnings${NC}"
+    echo -e "${GREEN}=================================================${NC}"
+
+    [ "$FAIL_COUNT" -eq 0 ]
 }
 
 enable_bbr_and_tcp_optimizations() {
@@ -957,17 +2201,14 @@ cleanup_old_rtmp_files() {
     SUDO=$(get_sudo)
 
     echo -e "${YELLOW}Cleaning up old RTMP temporary and cache files...${NC}"
-    rm -f ./get-docker.sh ./*.tmp ./*.log 2>/dev/null || true
+    rm -f ./get-docker.sh ./*.tmp ./*.log ./data/brb_video.mp4 ./data/brb_video.mp4.tmp 2>/dev/null || true
 
     if [ "$full_wipe" == "true" ]; then
         rm -f "$CONFIG_FILE" 2>/dev/null || true
-        rm -rf ./data ./logs "$PERSIST_USER_DIR" 2>/dev/null || true
+        rm -rf ./data ./logs ./obs-bridge "$PERSIST_USER_DIR" 2>/dev/null || true
         $SUDO rm -rf "$PERSIST_SYS_DIR" 2>/dev/null || true
     elif [ -d "./data" ]; then
         rm -f ./data/*.tmp ./data/*.log ./data/*.pid ./data/*.sock ./data/*.flv ./data/*.ts ./data/*.m3u8 2>/dev/null || true
-        if [ "$NOALBS_ENABLED" != "true" ] || [ "$CLOUD_BRB" != "true" ]; then
-            rm -f ./data/brb_video.mp4 ./data/brb_video.mp4.tmp 2>/dev/null || true
-        fi
     fi
 
     for base_dir in /tmp /var/tmp /var/run /var/cache /dev/shm; do
@@ -1068,26 +2309,25 @@ build_and_run() {
     fi
 
     mkdir -p ./data
-    if [ "$NOALBS_ENABLED" == "true" ] && [ "$CLOUD_BRB" == "true" ]; then
-        if [ -f "./data/brb_video.mp4" ] && [ -s "./data/brb_video.mp4" ]; then
-            echo -e "${GREEN}Existing BRB video found at ./data/brb_video.mp4. Preserving video source.${NC}"
-        else
-            if [ -z "$BRB_VIDEO_URL" ]; then
-                echo -e "${YELLOW}BRB Video URL is empty and no cached video exists. Setting to default...${NC}"
-                BRB_VIDEO_URL="https://filedn.com/lfh40bKbFfD5um9HDFNrJFR/brb.mp4"
-                save_config
-            fi
-            ensure_brb_video_transcoded "$BRB_VIDEO_URL"
-        fi
-    else
-        rm -f ./data/brb_video.mp4 ./data/brb_video.mp4.tmp 2>/dev/null || true
+    if [ "$NOALBS_ENABLED" == "true" ] && [ -z "$BRB_VIDEO_URL" ]; then
+        BRB_VIDEO_URL="https://filedn.com/lfh40bKbFfD5um9HDFNrJFR/brb.mp4"
+        save_config
     fi
 
-    echo -e "${GREEN}Building Docker Image...${NC}"
+    echo -e "${GREEN}Building CookieRTMPS Docker Image...${NC}"
     DOCKER_BUILDKIT=1 docker build -t cookie-rtmps .
 
-    echo -e "${GREEN}Starting container...${NC}"
-    docker rm -v -f cookie-rtmps 2>/dev/null || true
+    echo -e "${GREEN}Starting CookieRTMPS container...${NC}"
+    docker rm -v -f cookie-rtmps cookie-rtmps-obs 2>/dev/null || true
+
+    # When Disconnection Protection is enabled, cookie-rtmps listens on loopback 127.0.0.1:19359
+    # while the Lightweight OBS Bridge receives public/WireGuard RTMP on PORT_RTMP and feeds cookie-rtmps seamlessly.
+    local RTMP_PORT_BINDING="${PORT_RTMP}:1935"
+    local RELAY_ACCEPTED_IP="$ACCEPTED_IP"
+    if [ "$NOALBS_ENABLED" == "true" ]; then
+        RTMP_PORT_BINDING="127.0.0.1:${INTERNAL_RTMP_PORT}:1935"
+        RELAY_ACCEPTED_IP=""
+    fi
 
     local ENV_ARGS=(
         -e "YOUTUBE_URL=$YOUTUBE_URL" -e "YOUTUBE_KEY=$YOUTUBE_KEY"
@@ -1109,38 +2349,142 @@ build_and_run() {
         -e "V_X_URL=$V_X_URL" -e "V_X_KEY=$V_X_KEY"
         -e "V_TROVO_URL=$V_TROVO_URL" -e "V_TROVO_KEY=$V_TROVO_KEY"
         -e "V_RTMP1_URL=$V_RTMP1_URL" -e "V_RTMP1_KEY=$V_RTMP1_KEY"
-        -e "OBS_KEY=$OBS_KEY" -e "APP_NAME=$APP_NAME" -e "ACCEPTED_IP=$ACCEPTED_IP"
+        -e "OBS_KEY=$OBS_KEY" -e "APP_NAME=$APP_NAME" -e "ACCEPTED_IP=$RELAY_ACCEPTED_IP"
         -e "CHUNK_SIZE=$CHUNK_SIZE" -e "SERVER_DOMAIN=$SERVER_DOMAIN"
         -e "STREAM_BASE_TITLE=" -e "TWITCH_CLIENT_ID=" -e "TWITCH_OAUTH_TOKEN=" -e "TWITCH_BROADCASTER_ID="
-        -e "NOALBS_ENABLED=$NOALBS_ENABLED" -e "FALLBACK_MODE=$FALLBACK_MODE"
+        -e "NOALBS_ENABLED=false" -e "FALLBACK_MODE=$FALLBACK_MODE"
         -e "OBS_WS_HOST=$OBS_WS_HOST" -e "OBS_WS_PORT=$OBS_WS_PORT" -e "OBS_WS_PASSWORD=$OBS_WS_PASSWORD"
         -e "OBS_SCENE_LIVE=$OBS_SCENE_LIVE" -e "OBS_SCENE_BRB=$OBS_SCENE_BRB"
         -e "LOW_BITRATE=$LOW_BITRATE" -e "RESTORE_BITRATE=$RESTORE_BITRATE"
-        -e "CLOUD_BRB=$CLOUD_BRB" -e "CLOUD_BRB_TIMEOUT=$CLOUD_BRB_TIMEOUT"
+        -e "CLOUD_BRB=false" -e "CLOUD_BRB_TIMEOUT=$CLOUD_BRB_TIMEOUT"
     )
 
     docker run -d --name cookie-rtmps \
-        -p "${PORT_RTMP}:1935" \
+        -p "${RTMP_PORT_BINDING}" \
         --restart unless-stopped \
         "${ENV_ARGS[@]}" \
         -v "$(pwd)/data:/app/data" \
         cookie-rtmps
 
-    if [ $? -eq 0 ]; then
-        local DISPLAY_HOST=${SERVER_DOMAIN:-$(get_server_ip)}
-        echo -e "${GREEN}Container 'cookie-rtmps' is running!${NC}"
-        echo -e "You can stream to: rtmp://${DISPLAY_HOST}:${PORT_RTMP}/${APP_NAME}"
-        echo -e "Vertical stream:  rtmp://${DISPLAY_HOST}:${PORT_RTMP}/vertical"
-
-        if [ -f "./integration_test.sh" ]; then
-            echo -e "${YELLOW}Running integration tests...${NC}"
-            sleep 2
-            chmod +x ./integration_test.sh
-            ./integration_test.sh
-        fi
-    else
-        echo -e "${RED}Failed to start container.${NC}"
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}Failed to start cookie-rtmps container.${NC}"
+        echo -e "Press Enter to continue..."
+        read -r
+        return
     fi
+
+    local EXPECTED_RELAY_PORT="$PORT_RTMP"
+    [ "$NOALBS_ENABLED" == "true" ] && EXPECTED_RELAY_PORT="$INTERNAL_RTMP_PORT"
+    echo -e "${YELLOW}Waiting for CookieRTMPS services (nginx, stunnel, gunicorn) to bind port ${EXPECTED_RELAY_PORT}...${NC}"
+    for _ in $(seq 1 40); do
+        if docker exec cookie-rtmps pgrep -f "nginx" >/dev/null 2>&1 \
+           && python3 -c "import socket; s=socket.create_connection(('127.0.0.1', int('$EXPECTED_RELAY_PORT')), 0.5); s.close()" 2>/dev/null; then
+            break
+        fi
+        sleep 0.5
+    done
+
+    # Ensure multi-IP / WireGuard CIDR whitelist entries are split into separate Nginx directives if running direct mode
+    if [ "$NOALBS_ENABLED" != "true" ] && [[ "$ACCEPTED_IP" == *" "* ]]; then
+        docker exec cookie-rtmps python3 -c '
+import pathlib
+p = pathlib.Path("/etc/nginx/nginx.conf")
+if p.exists():
+    lines = []
+    for line in p.read_text().splitlines():
+        s = line.strip()
+        if s.startswith("allow publish ") and s.endswith(";") and len(s[:-1].split()) > 3:
+            indent = line[:len(line) - len(line.lstrip())]
+            for ip in s[len("allow publish "):-1].split():
+                lines.append(f"{indent}allow publish {ip};")
+        else:
+            lines.append(line)
+    p.write_text("\n".join(lines) + "\n")
+' 2>/dev/null || true
+        docker exec cookie-rtmps nginx -s reload 2>/dev/null || true
+    fi
+
+    if [ "$NOALBS_ENABLED" == "true" ]; then
+        echo -e "${GREEN}Building Slimline Lightweight Headless OBS Disconnection Protection Bridge...${NC}"
+        generate_lightweight_obs_bridge
+        DOCKER_BUILDKIT=1 docker build -t cookie-rtmps-obs ./obs-bridge
+
+        if [ $? -ne 0 ]; then
+            echo -e "${RED}Failed to build Lightweight OBS Bridge image.${NC}"
+            echo -e "Press Enter to continue..."
+            read -r
+            return
+        fi
+
+        echo -e "${GREEN}Starting Lightweight Headless OBS container ('${OBS_SCENE_LIVE}' & '${OBS_SCENE_BRB}')...${NC}"
+        local OBS_NET_ARGS=()
+        local RELAY_HOST_TARGET="127.0.0.1"
+        if [ "$(uname -s)" == "Linux" ]; then
+            OBS_NET_ARGS=(--network host)
+            RELAY_HOST_TARGET="127.0.0.1"
+        else
+            OBS_NET_ARGS=(-p "${PORT_RTMP}:${PORT_RTMP}" --add-host=host.docker.internal:host-gateway)
+            RELAY_HOST_TARGET="host.docker.internal"
+        fi
+
+        docker run -d --name cookie-rtmps-obs \
+            "${OBS_NET_ARGS[@]}" \
+            --shm-size=512m \
+            --restart unless-stopped \
+            -e "PORT_RTMP=$PORT_RTMP" \
+            -e "APP_NAME=$APP_NAME" \
+            -e "OBS_KEY=$OBS_KEY" \
+            -e "ACCEPTED_IP=$ACCEPTED_IP" \
+            -e "CHUNK_SIZE=$CHUNK_SIZE" \
+            -e "INTERNAL_RTMP_PORT=$INTERNAL_RTMP_PORT" \
+            -e "RELAY_HOST=$RELAY_HOST_TARGET" \
+            -e "OBS_WS_HOST=127.0.0.1" \
+            -e "OBS_WS_PORT=$OBS_WS_PORT" \
+            -e "OBS_WS_PASSWORD=$OBS_WS_PASSWORD" \
+            -e "OBS_SCENE_LIVE=$OBS_SCENE_LIVE" \
+            -e "OBS_SCENE_BRB=$OBS_SCENE_BRB" \
+            -e "LOW_BITRATE=$LOW_BITRATE" \
+            -e "RESTORE_BITRATE=$RESTORE_BITRATE" \
+            -e "BRB_VIDEO_URL=$BRB_VIDEO_URL" \
+            -e "BRB_VIDEO_LOOP=$BRB_VIDEO_LOOP" \
+            -e "CLOUD_BRB_TIMEOUT=$CLOUD_BRB_TIMEOUT" \
+            -e "OBS_BRIDGE_BITRATE=$OBS_BRIDGE_BITRATE" \
+            -v "$(pwd)/data:/app/data" \
+            cookie-rtmps-obs
+
+        if [ $? -ne 0 ]; then
+            echo -e "${RED}Failed to start Lightweight OBS Bridge container.${NC}"
+            echo -e "Press Enter to continue..."
+            read -r
+            return
+        fi
+
+        echo -e "${YELLOW}Waiting for Lightweight OBS & WebSocket server to initialize...${NC}"
+        for _ in $(seq 1 20); do
+            if python3 -c "import socket; s=socket.create_connection(('127.0.0.1', int('$PORT_RTMP')), 0.5); s.close()" 2>/dev/null \
+               && docker exec cookie-rtmps-obs pgrep -x obs >/dev/null 2>&1; then
+                break
+            fi
+            sleep 0.5
+        done
+    fi
+
+    local DISPLAY_HOST=${SERVER_DOMAIN:-$(get_server_ip)}
+    echo -e "${GREEN}Server is running!${NC}"
+    echo -e "You can stream to: rtmp://${DISPLAY_HOST}:${PORT_RTMP}/${APP_NAME}"
+    echo -e "Vertical stream:  rtmp://${DISPLAY_HOST}:${PORT_RTMP}/vertical"
+    if [ "$NOALBS_ENABLED" == "true" ]; then
+        echo -e "${CYAN}Disconnection Protection: ACTIVE${NC}"
+        echo -e "  - Main Scene: '${OBS_SCENE_LIVE}' (RTMP Ingest)"
+        echo -e "  - BRB Scene:  '${OBS_SCENE_BRB}' (Direct Browser Source MP4: ${BRB_VIDEO_URL}, Loop=${BRB_VIDEO_LOOP})"
+        echo -e "  - Trigger:    < ${LOW_BITRATE} kbps -> '${OBS_SCENE_BRB}' | >= ${RESTORE_BITRATE} kbps -> '${OBS_SCENE_LIVE}'"
+        echo -e "  - Timeout:    Disconnects stream after ${CLOUD_BRB_TIMEOUT} seconds in BRB"
+    else
+        echo -e "${YELLOW}Disconnection Protection (Lightweight OBS): DISABLED (Toggle ON in Menu Option 8 -> 1 to enable)${NC}"
+    fi
+
+    run_full_integration_tests
+
     echo -e "Press Enter to continue..."
     read -r
 }
@@ -1152,23 +2496,33 @@ view_logs() {
         return
     fi
 
-    echo -e "${YELLOW}Showing live logs for cookie-rtmps...${NC}"
+    local TARGET_CONTAINER="cookie-rtmps"
+    if docker ps --format '{{.Names}}' | grep -qx "cookie-rtmps-obs"; then
+        echo -e "${GREEN}=== Select Log Stream ===${NC}"
+        echo "1) CookieRTMPS Relay Logs (cookie-rtmps)"
+        echo "2) Lightweight OBS & Disconnection Protection Logs (cookie-rtmps-obs)"
+        echo -e "Select an option [1-2]: \c"
+        read -r log_target_opt
+        [ "$log_target_opt" == "2" ] && TARGET_CONTAINER="cookie-rtmps-obs"
+    fi
+
+    echo -e "${YELLOW}Showing live logs for ${TARGET_CONTAINER}...${NC}"
     echo -e "${YELLOW}(Press Ctrl+C to exit log view)${NC}\n"
     (
         trap 'exit 0' INT
-        docker logs --since 24h -f cookie-rtmps 2>&1 | awk '
+        docker logs --since 24h -f "$TARGET_CONTAINER" 2>&1 | awk '
             /GET \/stat HTTP/ { next }
             /ERROR|error|FAIL|fail|REJECTED|disconnect|Disconnect|failed|Failed/ {
                 print "\033[0;31m" $0 "\033[0m"
                 fflush()
                 next
             }
-            /WARNING|warning|LOW|low|taking over/ {
+            /WARNING|warning|LOW|low|taking over|Bitrate dropped|timeout/ {
                 print "\033[1;33m" $0 "\033[0m"
                 fflush()
                 next
             }
-            /NOALBS|Cloud BRB/ {
+            /NOALBS|Cloud BRB|Connection restored|Live ingest/ {
                 print "\033[0;36m" $0 "\033[0m"
                 fflush()
                 next
@@ -1192,10 +2546,12 @@ view_logs() {
             2)
                 echo -e "${YELLOW}Clearing logs...${NC}"
                 docker exec cookie-rtmps sh -c 'truncate -s 0 /var/log/nginx/access.log /var/log/nginx/error.log' 2>/dev/null || true
-                LOG_PATH=$(docker inspect --format='{{.LogPath}}' cookie-rtmps 2>/dev/null)
-                if [ -n "$LOG_PATH" ]; then
-                    sudo truncate -s 0 "$LOG_PATH" 2>/dev/null || truncate -s 0 "$LOG_PATH" 2>/dev/null || echo -e "${RED}Failed to truncate Docker log file. You may need sudo.${NC}"
-                fi
+                for cname in cookie-rtmps cookie-rtmps-obs; do
+                    LOG_PATH=$(docker inspect --format='{{.LogPath}}' "$cname" 2>/dev/null)
+                    if [ -n "$LOG_PATH" ]; then
+                        sudo truncate -s 0 "$LOG_PATH" 2>/dev/null || truncate -s 0 "$LOG_PATH" 2>/dev/null || true
+                    fi
+                done
                 echo -e "${GREEN}Logs cleared.${NC}"
                 sleep 1
                 ;;
@@ -1209,7 +2565,7 @@ deep_cleanup_ports_and_processes() {
     local SUDO
     SUDO=$(get_sudo)
 
-    local RAW_PORTS=("$PORT_RTMP" 81 1935 1936 3000 8080 8081 8088 8443 8888 9997 9998 19350 19351 19352 19353 19354 19355 19356 19357 19358 19359)
+    local RAW_PORTS=("$PORT_RTMP" "$INTERNAL_RTMP_PORT" 81 1935 1936 3000 8080 8081 8088 8443 8888 9997 9998 19350 19351 19352 19353 19354 19355 19356 19357 19358 19359)
     local PORTS=()
     for p in "${RAW_PORTS[@]}"; do
         [ -n "$p" ] && ! is_sensitive_port "$p" && PORTS+=("$p")
@@ -1245,9 +2601,9 @@ stop_and_uninstall() {
         local OLD_CONTAINERS
         OLD_CONTAINERS=$(docker ps -a --format '{{.ID}} {{.Names}} {{.Image}} {{.Labels}}' | grep -iE 'rtmp|rtmps|cookie|prism|nginx-rtmp' | awk '{print $1}' | sort -u)
         if [ -n "$OLD_CONTAINERS" ]; then
-            docker rm -v -f $OLD_CONTAINERS 2>/dev/null && echo -e "${GREEN}RTMP/RTMPS containers and volumes removed.${NC}" || true
+            docker rm -v -f $OLD_CONTAINERS 2>/dev/null && echo -e "${GREEN}RTMP/RTMPS and OBS containers removed.${NC}" || true
         else
-            docker rm -v -f cookie-rtmps 2>/dev/null || true
+            docker rm -v -f cookie-rtmps cookie-rtmps-obs 2>/dev/null || true
         fi
     fi
 
@@ -1263,9 +2619,9 @@ stop_and_uninstall() {
 
         OLD_IMAGES=$(docker images --format '{{.ID}} {{.Repository}} {{.Tag}}' | grep -iE 'rtmp|rtmps|cookie|prism' | awk '{print $1}' | sort -u)
         if [ -n "$OLD_IMAGES" ]; then
-            docker rmi -f $OLD_IMAGES 2>/dev/null && echo -e "${GREEN}RTMP/RTMPS images removed.${NC}" || true
+            docker rmi -f $OLD_IMAGES 2>/dev/null && echo -e "${GREEN}RTMP/RTMPS and OBS images removed.${NC}" || true
         else
-            docker rmi -f cookie-rtmps 2>/dev/null || true
+            docker rmi -f cookie-rtmps cookie-rtmps-obs 2>/dev/null || true
         fi
 
         echo -e "${YELLOW}Pruning Docker build cache, volumes, networks, and unused images...${NC}"
@@ -1277,7 +2633,7 @@ stop_and_uninstall() {
     fi
 
     cleanup_old_rtmp_files "true"
-    echo -e "${GREEN}CookieRTMPS and all RTMP/RTMPS components have been completely uninstalled and RTMP ports unbound.${NC}"
+    echo -e "${GREEN}CookieRTMPS and all RTMP/RTMPS/OBS components have been completely uninstalled and RTMP ports unbound.${NC}"
     sleep 2
 }
 
@@ -1292,6 +2648,11 @@ while true; do
     echo -e "${YELLOW}Quick Reference:${NC}"
     echo -e "  RTMP Ingest:     rtmp://${DISPLAY_HOST}:${PORT_RTMP}/${APP_NAME}"
     echo -e "  Vertical Ingest: rtmp://${DISPLAY_HOST}:${PORT_RTMP}/vertical"
+    if [ "$NOALBS_ENABLED" == "true" ]; then
+        echo -e "  OBS Protection:  ${GREEN}ENABLED${NC} ['${OBS_SCENE_LIVE}' <-> '${OBS_SCENE_BRB}' | <${LOW_BITRATE}kbps | Loop:${BRB_VIDEO_LOOP} | Timeout:${CLOUD_BRB_TIMEOUT}s]"
+    else
+        echo -e "  OBS Protection:  ${RED}DISABLED${NC}"
+    fi
     echo "-------------------------------------"
     echo "1) Install Docker (if not installed)"
     echo "2) Configure Stream Keys (Horizontal)"
@@ -1300,7 +2661,7 @@ while true; do
     echo "5) Configure IP Whitelist (Optional)"
     echo "6) Configure Domain / Reverse Proxy (Optional)"
     echo "7) Configure Optimizations (Chunk Size)"
-    echo "8) Configure NOALBS Scene Switcher"
+    echo "8) Configure Disconnection Protection & Lightweight OBS (NOALBS)"
     echo "9) Build & Start Server"
     echo "10) Run Integration Tests"
     echo "11) Stop Server & Uninstall"
@@ -1319,7 +2680,7 @@ while true; do
         7) configure_optimizations ;;
         8) configure_noalbs ;;
         9) build_and_run ;;
-        10) if [ -f "./integration_test.sh" ]; then chmod +x ./integration_test.sh; ./integration_test.sh; else echo -e "${RED}Test script not found.${NC}"; fi; echo -e "Press Enter to continue..."; read -r ;;
+        10) run_full_integration_tests; echo -e "Press Enter to continue..."; read -r ;;
         11) stop_and_uninstall ;;
         12) view_logs ;;
         13) clear; echo -e "${GREEN}Goodbye!${NC}"; break ;;
