@@ -80,9 +80,12 @@ BRB_VIDEO_URL="https://filedn.com/lfh40bKbFfD5um9HDFNrJFR/brb.mp4"
 BRB_VIDEO_LOOP="true"
 CLOUD_BRB_TIMEOUT="300"
 OBS_BRIDGE_BITRATE="6000"
-OBS_BRIDGE_RES="1280x720"
-OBS_BRIDGE_FPS="30"
+OBS_BRIDGE_PROFILE="epyc_1core_1080p60"
+OBS_BRIDGE_RES="1920x1080"
+OBS_BRIDGE_FPS="60"
 OBS_BRIDGE_PRESET="ultrafast"
+OBS_BRIDGE_X264_PROFILE="baseline"
+OBS_BRIDGE_THREADS="1"
 
 CONFIG_FILE="$SCRIPT_DIR/rtmp_config.env"
 PERSIST_USER_DIR="$HOME/.cookie-rtmps"
@@ -101,7 +104,8 @@ CONFIG_VARS=(
     NOALBS_ENABLED FALLBACK_MODE OBS_WS_HOST OBS_WS_PORT OBS_WS_PASSWORD
     OBS_SCENE_LIVE OBS_SCENE_BRB LOW_BITRATE RESTORE_BITRATE CLOUD_BRB
     BRB_VIDEO_URL BRB_VIDEO_LOOP CLOUD_BRB_TIMEOUT OBS_BRIDGE_BITRATE
-    OBS_BRIDGE_RES OBS_BRIDGE_FPS OBS_BRIDGE_PRESET PORT_RTMP
+    OBS_BRIDGE_PROFILE OBS_BRIDGE_RES OBS_BRIDGE_FPS OBS_BRIDGE_PRESET
+    OBS_BRIDGE_X264_PROFILE OBS_BRIDGE_THREADS PORT_RTMP
 )
 
 get_sudo() {
@@ -116,6 +120,18 @@ get_server_ip() {
         [ -z "$CACHED_SERVER_IP" ] && CACHED_SERVER_IP="<your_server_ip>"
     fi
     echo "$CACHED_SERVER_IP"
+}
+
+get_obs_profile_label() {
+    case "${1:-$OBS_BRIDGE_PROFILE}" in
+        epyc_1core_1080p60) echo "AMD EPYC 1-Core 1080p60" ;;
+        vps_1core_1080p30)  echo "VPS 1-Core Smooth 1080p30" ;;
+        vps_1core_720p60)   echo "VPS 1-Core Zero-Drop 720p60" ;;
+        vps_1core_720p30)   echo "VPS 1-Core Ultra-Light 720p30" ;;
+        vps_2core_1080p60)  echo "VPS 2-Core Balanced 1080p60" ;;
+        vps_4core_1080p60)  echo "VPS 4+ Core HQ 1080p60" ;;
+        *)                  echo "Custom" ;;
+    esac
 }
 
 write_config_to_path() {
@@ -181,6 +197,9 @@ sync_and_preserve_installation() {
         fi
     done
 
+    # Reset profile marker before sourcing so legacy configs migrate cleanly to the new 1080p60 AMD EPYC 1-core default
+    OBS_BRIDGE_PROFILE=""
+
     if [ -n "$found_config" ]; then
         [ "$found_config" != "$CONFIG_FILE" ] && cp -f "$found_config" "$CONFIG_FILE" 2>/dev/null || true
         source "$CONFIG_FILE"
@@ -190,7 +209,7 @@ sync_and_preserve_installation() {
         found_config="$CONFIG_FILE"
     fi
 
-    # Normalize defaults if missing from older config files
+    # Normalize defaults / migrate legacy configs without OBS_BRIDGE_PROFILE
     [ -z "$OBS_SCENE_LIVE" ] && OBS_SCENE_LIVE="main"
     [ -z "$OBS_SCENE_BRB" ] && OBS_SCENE_BRB="brb"
     [ -z "$LOW_BITRATE" ] && LOW_BITRATE="1000"
@@ -199,9 +218,20 @@ sync_and_preserve_installation() {
     [ -z "$BRB_VIDEO_LOOP" ] && BRB_VIDEO_LOOP="true"
     [ -z "$CLOUD_BRB_TIMEOUT" ] && CLOUD_BRB_TIMEOUT="300"
     [ -z "$OBS_BRIDGE_BITRATE" ] && OBS_BRIDGE_BITRATE="6000"
-    [ -z "$OBS_BRIDGE_RES" ] && OBS_BRIDGE_RES="1280x720"
-    [ -z "$OBS_BRIDGE_FPS" ] && OBS_BRIDGE_FPS="30"
+
+    if [ -z "$OBS_BRIDGE_PROFILE" ]; then
+        OBS_BRIDGE_PROFILE="epyc_1core_1080p60"
+        OBS_BRIDGE_RES="1920x1080"
+        OBS_BRIDGE_FPS="60"
+        OBS_BRIDGE_PRESET="ultrafast"
+        OBS_BRIDGE_X264_PROFILE="baseline"
+        OBS_BRIDGE_THREADS="1"
+    fi
+    [ -z "$OBS_BRIDGE_RES" ] && OBS_BRIDGE_RES="1920x1080"
+    [ -z "$OBS_BRIDGE_FPS" ] && OBS_BRIDGE_FPS="60"
     [ -z "$OBS_BRIDGE_PRESET" ] && OBS_BRIDGE_PRESET="ultrafast"
+    [ -z "$OBS_BRIDGE_X264_PROFILE" ] && OBS_BRIDGE_X264_PROFILE="baseline"
+    [ -z "$OBS_BRIDGE_THREADS" ] && OBS_BRIDGE_THREADS="1"
 
     local old_install_dirs=(
         "$(dirname "$SCRIPT_DIR")"
@@ -889,6 +919,161 @@ configure_whitelist() {
     done
 }
 
+select_obs_performance_profile() {
+    local HOST_CORES HOST_CPU
+    HOST_CORES=$(nproc 2>/dev/null || echo "1")
+    HOST_CPU=$(grep -m1 "model name" /proc/cpuinfo 2>/dev/null | cut -d: -f2 | xargs || echo "Unknown CPU")
+
+    clear
+    echo -e "${GREEN}=== Lightweight OBS VPS Performance Profiles ===${NC}"
+    echo -e "Detected Host CPU: ${CYAN}${HOST_CPU} (${HOST_CORES} vCPU)${NC}"
+    echo -e "Active Profile:    ${YELLOW}$(get_obs_profile_label) [${OBS_BRIDGE_RES}@${OBS_BRIDGE_FPS}fps | ${OBS_BRIDGE_PRESET} | ${OBS_BRIDGE_X264_PROFILE} | ${OBS_BRIDGE_THREADS}T | ${OBS_BRIDGE_BITRATE}kbps]${NC}"
+    echo ""
+    echo "  1) AMD EPYC 1-Core 1080p60 (Default)     - 1920x1080 @ 60fps | ultrafast | baseline | 1T | 6000 kbps"
+    echo "  2) VPS 1-Core Smooth 1080p30             - 1920x1080 @ 30fps | ultrafast | baseline | 1T | 4500 kbps"
+    echo "  3) VPS 1-Core Zero-Drop 720p60           - 1280x720  @ 60fps | ultrafast | baseline | 1T | 4500 kbps"
+    echo "  4) VPS 1-Core Ultra-Light 720p30         - 1280x720  @ 30fps | ultrafast | main     | 1T | 3500 kbps"
+    echo "  5) VPS 2-Core Balanced 1080p60           - 1920x1080 @ 60fps | ultrafast | main     | 2T | 6000 kbps"
+    echo "  6) VPS 4+ Core High-Quality 1080p60      - 1920x1080 @ 60fps | superfast | high     | 4T | 6000 kbps"
+    echo "  7) Custom Profile (Manual Resolution / FPS / Preset / Threads)"
+    echo "  8) Back"
+    echo -e "Select a profile [1-8]: \c"
+    read -r prof_opt
+
+    case $prof_opt in
+        1)
+            OBS_BRIDGE_PROFILE="epyc_1core_1080p60"
+            OBS_BRIDGE_RES="1920x1080"
+            OBS_BRIDGE_FPS="60"
+            OBS_BRIDGE_PRESET="ultrafast"
+            OBS_BRIDGE_X264_PROFILE="baseline"
+            OBS_BRIDGE_THREADS="1"
+            OBS_BRIDGE_BITRATE="6000"
+            save_config
+            echo -e "${GREEN}Applied AMD EPYC 1-Core 1080p60 profile (single-thread tuned, CABAC/B-frames/lookahead disabled).${NC}"
+            sleep 1
+            ;;
+        2)
+            OBS_BRIDGE_PROFILE="vps_1core_1080p30"
+            OBS_BRIDGE_RES="1920x1080"
+            OBS_BRIDGE_FPS="30"
+            OBS_BRIDGE_PRESET="ultrafast"
+            OBS_BRIDGE_X264_PROFILE="baseline"
+            OBS_BRIDGE_THREADS="1"
+            OBS_BRIDGE_BITRATE="4500"
+            save_config
+            echo -e "${GREEN}Applied VPS 1-Core Smooth 1080p30 profile.${NC}"
+            sleep 1
+            ;;
+        3)
+            OBS_BRIDGE_PROFILE="vps_1core_720p60"
+            OBS_BRIDGE_RES="1280x720"
+            OBS_BRIDGE_FPS="60"
+            OBS_BRIDGE_PRESET="ultrafast"
+            OBS_BRIDGE_X264_PROFILE="baseline"
+            OBS_BRIDGE_THREADS="1"
+            OBS_BRIDGE_BITRATE="4500"
+            save_config
+            echo -e "${GREEN}Applied VPS 1-Core Zero-Drop 720p60 profile.${NC}"
+            sleep 1
+            ;;
+        4)
+            OBS_BRIDGE_PROFILE="vps_1core_720p30"
+            OBS_BRIDGE_RES="1280x720"
+            OBS_BRIDGE_FPS="30"
+            OBS_BRIDGE_PRESET="ultrafast"
+            OBS_BRIDGE_X264_PROFILE="main"
+            OBS_BRIDGE_THREADS="1"
+            OBS_BRIDGE_BITRATE="3500"
+            save_config
+            echo -e "${GREEN}Applied VPS 1-Core Ultra-Light 720p30 profile.${NC}"
+            sleep 1
+            ;;
+        5)
+            OBS_BRIDGE_PROFILE="vps_2core_1080p60"
+            OBS_BRIDGE_RES="1920x1080"
+            OBS_BRIDGE_FPS="60"
+            OBS_BRIDGE_PRESET="ultrafast"
+            OBS_BRIDGE_X264_PROFILE="main"
+            OBS_BRIDGE_THREADS="2"
+            OBS_BRIDGE_BITRATE="6000"
+            save_config
+            echo -e "${GREEN}Applied VPS 2-Core Balanced 1080p60 profile.${NC}"
+            sleep 1
+            ;;
+        6)
+            OBS_BRIDGE_PROFILE="vps_4core_1080p60"
+            OBS_BRIDGE_RES="1920x1080"
+            OBS_BRIDGE_FPS="60"
+            OBS_BRIDGE_PRESET="superfast"
+            OBS_BRIDGE_X264_PROFILE="high"
+            OBS_BRIDGE_THREADS="4"
+            OBS_BRIDGE_BITRATE="6000"
+            save_config
+            echo -e "${GREEN}Applied VPS 4+ Core High-Quality 1080p60 profile.${NC}"
+            sleep 1
+            ;;
+        7)
+            OBS_BRIDGE_PROFILE="custom"
+            echo -e "Select Resolution (Current: ${OBS_BRIDGE_RES}):"
+            echo "  1) 1920x1080"
+            echo "  2) 1600x900"
+            echo "  3) 1280x720"
+            echo -e "Option: \c"
+            read -r res_opt
+            case $res_opt in
+                1) OBS_BRIDGE_RES="1920x1080" ;;
+                2) OBS_BRIDGE_RES="1600x900" ;;
+                3) OBS_BRIDGE_RES="1280x720" ;;
+            esac
+
+            echo -e "Select FPS (Current: ${OBS_BRIDGE_FPS}):"
+            echo "  1) 60 FPS"
+            echo "  2) 30 FPS"
+            echo -e "Option: \c"
+            read -r fps_opt
+            case $fps_opt in
+                1) OBS_BRIDGE_FPS="60" ;;
+                2) OBS_BRIDGE_FPS="30" ;;
+            esac
+
+            echo -e "Select x264 CPU Preset (Current: ${OBS_BRIDGE_PRESET}):"
+            echo "  1) ultrafast (Lowest CPU)"
+            echo "  2) superfast (Moderate CPU)"
+            echo "  3) veryfast (High CPU)"
+            echo -e "Option: \c"
+            read -r pre_opt
+            case $pre_opt in
+                1) OBS_BRIDGE_PRESET="ultrafast" ;;
+                2) OBS_BRIDGE_PRESET="superfast" ;;
+                3) OBS_BRIDGE_PRESET="veryfast" ;;
+            esac
+
+            echo -e "Select H.264 Profile (Current: ${OBS_BRIDGE_X264_PROFILE}):"
+            echo "  1) baseline (Fastest on 1-core CPU - disables CABAC)"
+            echo "  2) main (Balanced)"
+            echo "  3) high (Best quality for 4+ cores)"
+            echo -e "Option: \c"
+            read -r h264_opt
+            case $h264_opt in
+                1) OBS_BRIDGE_X264_PROFILE="baseline" ;;
+                2) OBS_BRIDGE_X264_PROFILE="main" ;;
+                3) OBS_BRIDGE_X264_PROFILE="high" ;;
+            esac
+
+            echo -e "Enter x264 Encoder Threads (1 for single-core VPS, Current: ${OBS_BRIDGE_THREADS}): \c"
+            read -r thr_in
+            if [[ "$thr_in" =~ ^[0-9]+$ ]] && [ "$thr_in" -ge 1 ]; then
+                OBS_BRIDGE_THREADS="$thr_in"
+            fi
+            save_config
+            sleep 1
+            ;;
+        8|"") return ;;
+        *) echo -e "${RED}Invalid option${NC}"; sleep 1 ;;
+    esac
+}
+
 configure_noalbs() {
     while true; do
         clear
@@ -905,7 +1090,7 @@ configure_noalbs() {
         echo "7) Main/Live Scene Name (Current: $OBS_SCENE_LIVE)"
         echo "8) BRB Scene Name (Current: $OBS_SCENE_BRB)"
         echo "9) Lightweight OBS Output Bitrate (Current: ${OBS_BRIDGE_BITRATE} kbps)"
-        echo "10) Lightweight OBS Performance Profile (Res: ${OBS_BRIDGE_RES}, FPS: ${OBS_BRIDGE_FPS}, Preset: ${OBS_BRIDGE_PRESET})"
+        echo "10) Lightweight OBS Performance Profile ($(get_obs_profile_label) | Res: ${OBS_BRIDGE_RES}, FPS: ${OBS_BRIDGE_FPS}, Preset: ${OBS_BRIDGE_PRESET}, ${OBS_BRIDGE_THREADS}T)"
         echo "11) OBS WebSocket Port (Current: $OBS_WS_PORT)"
         echo "12) OBS WebSocket Password (Current: ${OBS_WS_PASSWORD:-(Disabled/Local Only)})"
         echo "13) Back to Main Menu"
@@ -1001,39 +1186,7 @@ configure_noalbs() {
                 fi
                 ;;
             10)
-                echo -e "Select OBS Bridge Resolution (Recommended: 1280x720 for lag-free CPU VPS):"
-                echo "  1) 1280x720 (Recommended - Zero Drop on 2+ vCPU VPS)"
-                echo "  2) 1920x1080 (Requires 4+ Dedicated High-Clock vCPUs)"
-                echo -e "Option (Current: ${OBS_BRIDGE_RES}): \c"
-                read -r res_opt
-                case $res_opt in
-                    1) OBS_BRIDGE_RES="1280x720" ;;
-                    2) OBS_BRIDGE_RES="1920x1080" ;;
-                esac
-
-                echo -e "Select OBS Bridge FPS (Current: ${OBS_BRIDGE_FPS}):"
-                echo "  1) 30 FPS (Recommended - Smooth & Low CPU)"
-                echo "  2) 60 FPS (High CPU Usage)"
-                echo -e "Option: \c"
-                read -r fps_opt
-                case $fps_opt in
-                    1) OBS_BRIDGE_FPS="30" ;;
-                    2) OBS_BRIDGE_FPS="60" ;;
-                esac
-
-                echo -e "Select x264 CPU Preset (Current: ${OBS_BRIDGE_PRESET}):"
-                echo "  1) ultrafast (Recommended - Lowest CPU / Zero Frame Drops)"
-                echo "  2) superfast (Moderate CPU)"
-                echo "  3) veryfast (High CPU)"
-                echo -e "Option: \c"
-                read -r pre_opt
-                case $pre_opt in
-                    1) OBS_BRIDGE_PRESET="ultrafast" ;;
-                    2) OBS_BRIDGE_PRESET="superfast" ;;
-                    3) OBS_BRIDGE_PRESET="veryfast" ;;
-                esac
-                save_config
-                sleep 1
+                select_obs_performance_profile
                 ;;
             11)
                 echo -e "Enter OBS WebSocket Port (Default: 4455):"
@@ -1171,9 +1324,11 @@ OBS_SCENE_BRB = os.environ.get("OBS_SCENE_BRB", "brb")
 BRB_VIDEO_URL = os.environ.get("BRB_VIDEO_URL", "https://filedn.com/lfh40bKbFfD5um9HDFNrJFR/brb.mp4")
 BRB_VIDEO_LOOP = os.environ.get("BRB_VIDEO_LOOP", "true")
 OBS_BRIDGE_BITRATE = int(os.environ.get("OBS_BRIDGE_BITRATE", "6000"))
-OBS_BRIDGE_RES = os.environ.get("OBS_BRIDGE_RES", "1280x720")
-OBS_BRIDGE_FPS = int(os.environ.get("OBS_BRIDGE_FPS", "30"))
+OBS_BRIDGE_RES = os.environ.get("OBS_BRIDGE_RES", "1920x1080")
+OBS_BRIDGE_FPS = int(os.environ.get("OBS_BRIDGE_FPS", "60"))
 OBS_BRIDGE_PRESET = os.environ.get("OBS_BRIDGE_PRESET", "ultrafast")
+OBS_BRIDGE_X264_PROFILE = os.environ.get("OBS_BRIDGE_X264_PROFILE", "baseline")
+OBS_BRIDGE_THREADS = max(1, int(os.environ.get("OBS_BRIDGE_THREADS", "1")))
 INTERNAL_RTMP_PORT = os.environ.get("INTERNAL_RTMP_PORT", "19359")
 CHUNK_SIZE = os.environ.get("CHUNK_SIZE", "8192")
 ACCEPTED_IP = os.environ.get("ACCEPTED_IP", "").strip()
@@ -1184,7 +1339,7 @@ try:
     if res_w < 320 or res_h < 240:
         raise ValueError
 except Exception:
-    res_w, res_h = 1280, 720
+    res_w, res_h = 1920, 1080
 
 obs_root = "/root/.config/obs-studio"
 profile_dir = os.path.join(obs_root, "basic", "profiles", "CookieRTMPS")
@@ -1243,7 +1398,9 @@ for ini_name in ("global.ini", "user.ini"):
     with open(os.path.join(obs_root, ini_name), "w", encoding="utf-8") as f:
         cfg.write(f, space_around_delimiters=False)
 
-# 2. OBS Encoding Profile (Advanced Mode -> deterministic obs_x264 ultrafast + bilinear scaling + auto-reconnect)
+# 2. OBS Encoding Profile (Advanced Mode -> AMD EPYC 1-core tuned obs_x264 + bilinear scaling + auto-reconnect)
+audio_bitrate = "128" if OBS_BRIDGE_THREADS == 1 else "160"
+
 basic_ini = configparser.ConfigParser()
 basic_ini.optionxform = str
 basic_ini["General"] = {"Name": "CookieRTMPS"}
@@ -1273,7 +1430,7 @@ basic_ini["AdvOut"] = {
     "Encoder": "obs_x264",
     "AudioEncoder": "ffmpeg_aac",
     "Rescale": "false",
-    "Track1Bitrate": "160",
+    "Track1Bitrate": audio_bitrate,
     "Track1Name": "Track1",
 }
 basic_ini["Audio"] = {
@@ -1283,17 +1440,46 @@ basic_ini["Audio"] = {
 with open(os.path.join(profile_dir, "basic.ini"), "w", encoding="utf-8") as f:
     basic_ini.write(f, space_around_delimiters=False)
 
-# Dedicated obs_x264 encoder settings: ultrafast + zerolatency + no B-frame lookahead = smooth zero-drop CPU encoding
+# Dedicated obs_x264 settings tuned for single-core AMD EPYC AVX2 or multi-core VPS profiles
+if OBS_BRIDGE_THREADS == 1:
+    x264_opts = [
+        "threads=1",
+        "sliced-threads=0",
+        "rc-lookahead=0",
+        "bframes=0",
+        "scenecut=0",
+        "aq-mode=0",
+        "mbtree=0",
+        "subme=0",
+        "me=dia",
+        "trellis=0",
+        "weightp=0",
+        "ref=1",
+    ]
+else:
+    x264_opts = [
+        f"threads={OBS_BRIDGE_THREADS}",
+        "rc-lookahead=0",
+        "bframes=0",
+        "scenecut=0",
+        "aq-mode=0",
+        "mbtree=0",
+        "weightp=0",
+    ]
+
+if OBS_BRIDGE_X264_PROFILE == "baseline":
+    x264_opts.append("cabac=0")
+
 stream_encoder_json = {
     "bitrate": OBS_BRIDGE_BITRATE,
     "buffer_size": OBS_BRIDGE_BITRATE,
     "keyint_sec": 2,
     "preset": OBS_BRIDGE_PRESET,
-    "profile": "main",
+    "profile": OBS_BRIDGE_X264_PROFILE,
     "rate_control": "CBR",
     "tune": "zerolatency",
     "use_bufsize": False,
-    "x264opts": "rc-lookahead=0 bframes=0 scenecut=0",
+    "x264opts": " ".join(x264_opts),
 }
 with open(os.path.join(profile_dir, "streamEncoder.json"), "w", encoding="utf-8") as f:
     json.dump(stream_encoder_json, f, indent=2)
@@ -1673,7 +1859,6 @@ def get_ingest_stats():
                 if live is None:
                     return False, 0.0, 0, ""
                 for stream in live.findall("stream"):
-                    # Check both stream-level <publishing/> and client-level <publishing/>
                     is_pub = (stream.find("publishing") is not None) or any(
                         c.find("publishing") is not None for c in stream.findall("client")
                     )
@@ -1749,7 +1934,6 @@ class OBSClient:
         hello_raw = await asyncio.wait_for(self.ws.recv(), timeout=5.0)
         hello = json.loads(hello_raw)
         auth_obj = hello.get("d", {}).get("authentication")
-        # eventSubscriptions=0 prevents OBS from flooding the receive buffer with unsolicited events
         identify_d = {"rpcVersion": 1, "eventSubscriptions": 0}
         if auth_obj:
             pwd = load_effective_ws_password(self.password)
@@ -1842,7 +2026,6 @@ class OBSClient:
             allow_error=True,
         )
         if not status_resp.get("requestStatus", {}).get("result", False):
-            # Browser source (CEF) fallback refresh
             if force_restart:
                 await self.call(
                     "PressInputPropertiesButton",
@@ -1993,7 +2176,6 @@ async def run_controller():
                         brb_started_at = None
                         cooldown_until = now + 5.0
                     else:
-                        # Keep stream online and keep BRB MP4 looping continuously during protection window
                         await obs.ensure_streaming()
                         if BRB_VIDEO_LOOP and (now - last_brb_media_check >= 2.0):
                             await obs.ensure_brb_playing(force_restart=False)
@@ -2132,7 +2314,6 @@ async def main():
             cur1 = cur1_data.get("currentProgramSceneName")
             assert cur1 == SCENE_BRB, f"Expected '{SCENE_BRB}', got '{cur1}'"
 
-            # Verify BRB MP4 actually starts playing when switching to 'brb'
             brb_state = "BROWSER"
             for _ in range(8):
                 m_data, m_status = await call("GetMediaInputStatus", {"inputName": "BRB_Browser_Source"}, allow_error=True)
@@ -2167,9 +2348,12 @@ export PULSE_RUNTIME_PATH="$XDG_RUNTIME_DIR/pulse"
 mkdir -p "$XDG_RUNTIME_DIR" "$PULSE_RUNTIME_PATH"
 chmod 700 "$XDG_RUNTIME_DIR"
 
-# Cap llvmpipe software rendering threads so x264 & media decoder always have ample CPU headroom
-CPU_CORES=$(nproc 2>/dev/null || echo 2)
-if [ "$CPU_CORES" -ge 4 ]; then
+# Tune LLVMpipe software rendering threads to eliminate context switching on 1-core AMD EPYC VPS
+CPU_CORES=$(nproc 2>/dev/null || echo 1)
+BRIDGE_THREADS="${OBS_BRIDGE_THREADS:-1}"
+if [ "$CPU_CORES" -le 1 ] || [ "$BRIDGE_THREADS" -le 1 ]; then
+    export LP_NUM_THREADS=0
+elif [ "$CPU_CORES" -ge 4 ]; then
     export LP_NUM_THREADS=2
 else
     export LP_NUM_THREADS=1
@@ -2206,7 +2390,11 @@ if [ -n "$OBS_WS_PASSWORD" ]; then
     OBS_ARGS+=(--websocket_password="$OBS_WS_PASSWORD")
 fi
 
-obs "${OBS_ARGS[@]}" >/tmp/obs.log 2>&1 &
+if command -v nice >/dev/null 2>&1; then
+    (nice -n -5 obs "${OBS_ARGS[@]}" >/tmp/obs.log 2>&1 || obs "${OBS_ARGS[@]}" >/tmp/obs.log 2>&1) &
+else
+    obs "${OBS_ARGS[@]}" >/tmp/obs.log 2>&1 &
+fi
 
 # Wait up to 20s for OBS WebSocket to bind before starting controller
 for _ in $(seq 1 40); do
@@ -2441,7 +2629,7 @@ s.close()
         if echo "$OBS_TEST_OUTPUT" | grep -q "OK:OBS_STATS:"; then
             local STATS_LINE
             STATS_LINE=$(echo "$OBS_TEST_OUTPUT" | grep "OK:OBS_STATS:" | sed 's/OK:OBS_STATS://')
-            record_pass "OBS runtime performance stats (${OBS_BRIDGE_RES}@${OBS_BRIDGE_FPS}fps, ${OBS_BRIDGE_PRESET}): ${STATS_LINE}."
+            record_pass "OBS runtime performance stats ($(get_obs_profile_label) | ${OBS_BRIDGE_RES}@${OBS_BRIDGE_FPS}fps, ${OBS_BRIDGE_PRESET}/${OBS_BRIDGE_X264_PROFILE}, ${OBS_BRIDGE_THREADS}T): ${STATS_LINE}."
         fi
 
         if echo "$OBS_TEST_OUTPUT" | grep -q "OK:BRB_PLAYBACK:OBS_MEDIA_STATE_PLAYING\|OK:BRB_PLAYBACK:BROWSER"; then
@@ -2780,7 +2968,7 @@ if p.exists():
             return
         fi
 
-        echo -e "${GREEN}Starting Lightweight Headless OBS container ('${OBS_SCENE_LIVE}' & '${OBS_SCENE_BRB}', ${OBS_BRIDGE_RES}@${OBS_BRIDGE_FPS}fps ${OBS_BRIDGE_PRESET})...${NC}"
+        echo -e "${GREEN}Starting Lightweight Headless OBS container ('${OBS_SCENE_LIVE}' & '${OBS_SCENE_BRB}', $(get_obs_profile_label) ${OBS_BRIDGE_RES}@${OBS_BRIDGE_FPS}fps ${OBS_BRIDGE_PRESET}/${OBS_BRIDGE_X264_PROFILE} ${OBS_BRIDGE_THREADS}T)...${NC}"
         local OBS_NET_ARGS=()
         local RELAY_HOST_TARGET="127.0.0.1"
         if [ "$(uname -s)" == "Linux" ]; then
@@ -2813,9 +3001,12 @@ if p.exists():
             -e "BRB_VIDEO_LOOP=$BRB_VIDEO_LOOP" \
             -e "CLOUD_BRB_TIMEOUT=$CLOUD_BRB_TIMEOUT" \
             -e "OBS_BRIDGE_BITRATE=$OBS_BRIDGE_BITRATE" \
+            -e "OBS_BRIDGE_PROFILE=$OBS_BRIDGE_PROFILE" \
             -e "OBS_BRIDGE_RES=$OBS_BRIDGE_RES" \
             -e "OBS_BRIDGE_FPS=$OBS_BRIDGE_FPS" \
             -e "OBS_BRIDGE_PRESET=$OBS_BRIDGE_PRESET" \
+            -e "OBS_BRIDGE_X264_PROFILE=$OBS_BRIDGE_X264_PROFILE" \
+            -e "OBS_BRIDGE_THREADS=$OBS_BRIDGE_THREADS" \
             -v "$(pwd)/data:/app/data" \
             cookie-rtmps-obs
 
@@ -2842,7 +3033,8 @@ if p.exists():
     echo -e "Vertical stream:  rtmp://${DISPLAY_HOST}:${PORT_RTMP}/vertical"
     if [ "$NOALBS_ENABLED" == "true" ]; then
         echo -e "${CYAN}Disconnection Protection: ACTIVE${NC}"
-        echo -e "  - Main Scene: '${OBS_SCENE_LIVE}' (RTMP/RTMPS Ingest, ${OBS_BRIDGE_RES}@${OBS_BRIDGE_FPS}fps ${OBS_BRIDGE_PRESET})"
+        echo -e "  - Profile:    $(get_obs_profile_label) (${OBS_BRIDGE_RES}@${OBS_BRIDGE_FPS}fps, ${OBS_BRIDGE_PRESET}/${OBS_BRIDGE_X264_PROFILE}, ${OBS_BRIDGE_THREADS}T, ${OBS_BRIDGE_BITRATE}kbps)"
+        echo -e "  - Main Scene: '${OBS_SCENE_LIVE}' (RTMP/RTMPS Ingest)"
         echo -e "  - BRB Scene:  '${OBS_SCENE_BRB}' (Direct MP4 URL: ${BRB_VIDEO_URL}, Loop=${BRB_VIDEO_LOOP})"
         echo -e "  - Trigger:    <= ${LOW_BITRATE} kbps -> '${OBS_SCENE_BRB}' | > ${RESTORE_BITRATE} kbps -> '${OBS_SCENE_LIVE}'"
         echo -e "  - Timeout:    Takes OBS offline & resets to '${OBS_SCENE_LIVE}' after ${CLOUD_BRB_TIMEOUT}s in BRB"
@@ -3016,7 +3208,7 @@ while true; do
     echo -e "  RTMP Ingest:     rtmp://${DISPLAY_HOST}:${PORT_RTMP}/${APP_NAME}"
     echo -e "  Vertical Ingest: rtmp://${DISPLAY_HOST}:${PORT_RTMP}/vertical"
     if [ "$NOALBS_ENABLED" == "true" ]; then
-        echo -e "  OBS Protection:  ${GREEN}ENABLED${NC} ['${OBS_SCENE_LIVE}' <-> '${OBS_SCENE_BRB}' | <=${LOW_BITRATE}kbps | ${OBS_BRIDGE_RES}@${OBS_BRIDGE_FPS}fps | Timeout:${CLOUD_BRB_TIMEOUT}s]"
+        echo -e "  OBS Protection:  ${GREEN}ENABLED${NC} ['${OBS_SCENE_LIVE}' <-> '${OBS_SCENE_BRB}' | <=${LOW_BITRATE}kbps | ${OBS_BRIDGE_RES}@${OBS_BRIDGE_FPS}fps (${OBS_BRIDGE_THREADS}T) | Timeout:${CLOUD_BRB_TIMEOUT}s]"
     else
         echo -e "  OBS Protection:  ${RED}DISABLED${NC}"
     fi
