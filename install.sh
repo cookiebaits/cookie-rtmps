@@ -65,7 +65,7 @@ CHUNK_SIZE="8192"
 # Host Port Settings
 PORT_RTMP="1935"
 
-# NOALBS & Server-Side BRB Protection Settings (Disabled by default)
+# NOALBS & Server-Side BRB Protection Settings (Disabled by default -> Pure RTMP passthrough)
 NOALBS_ENABLED="false"
 FALLBACK_MODE="video"
 OBS_WS_HOST="127.0.0.1"
@@ -76,7 +76,7 @@ OBS_SCENE_BRB="BRB"
 LOW_BITRATE="1000"
 RESTORE_BITRATE="1500"
 CLOUD_BRB="false"
-BRB_VIDEO_URL=""
+BRB_VIDEO_URL="https://filedn.com/lfh40bKbFfD5um9HDFNrJFR/brb.mp4"
 CLOUD_BRB_TIMEOUT="300"
 
 # Latest detected plugin versions (populated without apt-get)
@@ -271,17 +271,32 @@ build_default_whitelist() {
     echo "$combined"
 }
 
-sync_obs_container_whitelist() {
-    # Ensure cookie-rtmps-obs has individual 'allow publish <ip/cidr>;' rules for every comma-separated ACCEPTED_IP entry
-    command -v docker &> /dev/null || return 0
-    docker ps --format '{{.Names}}' | grep -qx 'cookie-rtmps-obs' || return 0
+ensure_localhost_in_whitelist() {
+    # Ensure 127.0.0.1 is always present when a whitelist is active so local Cloud BRB FFmpeg pushes and Stunnel relays are never rejected
+    local list="$1"
+    [ -z "$list" ] && { echo ""; return 0; }
+    if [[ ",$list," != *",127.0.0.1,"* ]]; then
+        echo "127.0.0.1,${list}"
+    else
+        echo "$list"
+    fi
+}
 
-    echo -e "${CYAN}Syncing IP whitelist rules into 'cookie-rtmps-obs'...${NC}"
+sync_container_nginx_whitelist() {
+    # Ensure a target Nginx-RTMP container has individual 'allow publish <ip/cidr>;' rules for every comma-separated ACCEPTED_IP entry
+    local container_name="$1"
+    local effective_ip
+    effective_ip=$(ensure_localhost_in_whitelist "$ACCEPTED_IP")
+
+    command -v docker &> /dev/null || return 0
+    docker ps --format '{{.Names}}' | grep -qx "$container_name" || return 0
+
+    echo -e "${CYAN}Syncing IP whitelist rules into '${container_name}'...${NC}"
 
     local rules_block=""
-    if [ -n "$ACCEPTED_IP" ]; then
+    if [ -n "$effective_ip" ]; then
         local entry
-        for entry in $(echo "$ACCEPTED_IP" | tr ',' ' '); do
+        for entry in $(echo "$effective_ip" | tr ',' ' '); do
             entry=$(echo "$entry" | tr -d '[:space:]')
             [ -n "$entry" ] && rules_block="${rules_block}            allow publish ${entry};"$'\n'
         done
@@ -290,7 +305,7 @@ sync_obs_container_whitelist() {
         rules_block="            allow publish all;"
     fi
 
-    docker exec -i -e "WL_RULES=$rules_block" cookie-rtmps-obs sh -c '
+    docker exec -i -e "WL_RULES=$rules_block" "$container_name" sh -c '
         CONF=""
         for candidate in /etc/nginx/nginx.conf /usr/local/nginx/conf/nginx.conf /etc/nginx/rtmp.conf; do
             if [ -f "$candidate" ] && grep -q "rtmp[[:space:]]*{" "$candidate"; then
@@ -300,21 +315,19 @@ sync_obs_container_whitelist() {
         done
 
         if [ -z "$CONF" ]; then
-            echo "No RTMP nginx.conf found inside cookie-rtmps-obs." >&2
+            echo "No RTMP nginx.conf found inside container." >&2
             exit 1
         fi
 
         cp -f "$CONF" "${CONF}.bak"
 
         awk -v rules="$WL_RULES" '\''
-            BEGIN { in_rtmp = 0; in_app = 0; inserted = 0 }
+            BEGIN { in_rtmp = 0; in_app = 0 }
             /^[[:space:]]*rtmp[[:space:]]*\{/ { in_rtmp = 1 }
             in_rtmp && /^[[:space:]]*application[[:space:]]+[^{]+\{/ {
                 in_app = 1
-                inserted = 0
                 print
                 print rules
-                inserted = 1
                 next
             }
             in_app && /^[[:space:]]*(allow|deny)[[:space:]]+publish[[:space:]]+/ {
@@ -332,15 +345,97 @@ sync_obs_container_whitelist() {
             exit 0
         else
             mv -f "${CONF}.bak" "$CONF"
-            echo "Nginx syntax validation failed; rolled back cookie-rtmps-obs config." >&2
+            echo "Nginx syntax validation failed; rolled back config." >&2
             exit 1
         fi
     '
 
     if [ $? -eq 0 ]; then
-        echo -e "${GREEN}Whitelist rules synced and reloaded inside 'cookie-rtmps-obs'.${NC}"
+        echo -e "${GREEN}Whitelist rules synced and reloaded inside '${container_name}'.${NC}"
     else
-        echo -e "${YELLOW}Warning: Could not automatically reload whitelist in 'cookie-rtmps-obs'.${NC}"
+        echo -e "${YELLOW}Warning: Could not automatically reload whitelist in '${container_name}'.${NC}"
+    fi
+}
+
+sync_obs_container_whitelist() {
+    # Skip OBS whitelist syncing completely when disconnection protection is disabled
+    [ "$NOALBS_ENABLED" == "true" ] || return 0
+    sync_container_nginx_whitelist "cookie-rtmps-obs"
+}
+
+verify_disconnection_protection() {
+    echo -e "\n${CYAN}=== Disconnection Protection Health Check ===${NC}"
+    if ! command -v docker &> /dev/null || ! docker ps --format '{{.Names}}' | grep -qx 'cookie-rtmps'; then
+        echo -e "  ${RED}[FAIL]${NC} Container 'cookie-rtmps' is not running."
+        return 1
+    fi
+
+    local env_dump
+    env_dump=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' cookie-rtmps 2>/dev/null || true)
+    local live_enabled live_mode live_cloud live_low live_restore
+    live_enabled=$(echo "$env_dump" | awk -F= '$1=="NOALBS_ENABLED"{print $2}')
+    live_mode=$(echo "$env_dump" | awk -F= '$1=="FALLBACK_MODE"{print $2}')
+    live_cloud=$(echo "$env_dump" | awk -F= '$1=="CLOUD_BRB"{print $2}')
+    live_low=$(echo "$env_dump" | awk -F= '$1=="LOW_BITRATE"{print $2}')
+    live_restore=$(echo "$env_dump" | awk -F= '$1=="RESTORE_BITRATE"{print $2}')
+
+    if [ "$live_enabled" != "true" ]; then
+        echo -e "  ${YELLOW}[INFO]${NC} Disconnection protection is DISABLED inside 'cookie-rtmps' (Pure RTMP Passthrough)."
+        return 0
+    fi
+
+    echo -e "  ${GREEN}[PASS]${NC} Protection active: mode=${live_mode:-video}, cloud_brb=${live_cloud:-false}, low=${live_low}kbps, restore=${live_restore}kbps"
+
+    # 1. Verify watcher process (NOALBS or Python/Cloud BRB monitor)
+    if docker exec cookie-rtmps sh -c 'ps aux 2>/dev/null || ps -ef 2>/dev/null' | grep -iE 'noalbs|cloud_brb|brb_monitor|stream_validator' | grep -vq grep; then
+        echo -e "  ${GREEN}[PASS]${NC} NOALBS / Cloud BRB monitor process is running inside 'cookie-rtmps'."
+    else
+        echo -e "  ${RED}[FAIL]${NC} No NOALBS or Cloud BRB monitor process detected inside 'cookie-rtmps'!"
+        echo -e "         Check container logs via Option 12 for startup errors."
+    fi
+
+    # 2. Verify /stat XML endpoint inside container (required to read bw_in bitrate)
+    local stat_ok=0
+    for stat_port in 8080 8081 8088 80; do
+        if docker exec cookie-rtmps sh -c "curl -fsS --max-time 2 http://127.0.0.1:${stat_port}/stat 2>/dev/null | grep -q '<rtmp>'" 2>/dev/null; then
+            echo -e "  ${GREEN}[PASS]${NC} Nginx-RTMP /stat XML telemetry responding on 127.0.0.1:${stat_port}."
+            stat_ok=1
+            break
+        fi
+    done
+    if [ "$stat_ok" -eq 0 ]; then
+        echo -e "  ${YELLOW}[WARN]${NC} Could not verify Nginx-RTMP /stat XML on standard ports (8080/8081/8088/80)."
+    fi
+
+    # 3. Verify 127.0.0.1 is whitelisted for local BRB FFmpeg pushes
+    if docker exec cookie-rtmps nginx -T 2>/dev/null | grep -qE 'allow[[:space:]]+publish[[:space:]]+(127\.0\.0\.1|all);'; then
+        echo -e "  ${GREEN}[PASS]${NC} Localhost (127.0.0.1) is allowed to publish BRB fallback streams."
+    else
+        echo -e "  ${RED}[FAIL]${NC} 127.0.0.1 is missing from Nginx-RTMP publish whitelist — local Cloud BRB pushes will be rejected!"
+    fi
+
+    # 4. Verify BRB MP4 exists and is non-empty when in video/Cloud BRB mode
+    if [ "$live_cloud" == "true" ] || [ "$live_mode" == "video" ]; then
+        local brb_size
+        brb_size=$(docker exec cookie-rtmps sh -c '[ -s /app/data/brb_video.mp4 ] && wc -c < /app/data/brb_video.mp4 || echo 0' 2>/dev/null | tr -d '[:space:]')
+        if [[ "$brb_size" =~ ^[0-9]+$ ]] && [ "$brb_size" -gt 10240 ]; then
+            echo -e "  ${GREEN}[PASS]${NC} BRB MP4 verified inside container (/app/data/brb_video.mp4, ${brb_size} bytes)."
+        else
+            echo -e "  ${RED}[FAIL]${NC} /app/data/brb_video.mp4 is missing or corrupted (${brb_size} bytes). Re-download via Option 8 -> 11."
+        fi
+    fi
+
+    # 5. Verify OBS WebSocket reachability if in OBS scene-switch mode
+    if [ "$live_mode" == "obs" ]; then
+        local ws_host ws_port
+        ws_host=$(echo "$env_dump" | awk -F= '$1=="OBS_WS_HOST"{print $2}')
+        ws_port=$(echo "$env_dump" | awk -F= '$1=="OBS_WS_PORT"{print $2}')
+        if docker exec cookie-rtmps sh -c "nc -z -w 2 '${ws_host}' '${ws_port}' 2>/dev/null || curl -s --max-time 2 'http://${ws_host}:${ws_port}' >/dev/null 2>&1"; then
+            echo -e "  ${GREEN}[PASS]${NC} OBS WebSocket endpoint ${ws_host}:${ws_port} is reachable from container."
+        else
+            echo -e "  ${RED}[FAIL]${NC} OBS WebSocket ${ws_host}:${ws_port} is NOT reachable from inside 'cookie-rtmps'."
+            echo -e "         If OBS runs on the host, set OBS_WS_HOST to 'host.docker.internal'."
+        fi
     fi
 }
 
@@ -475,17 +570,22 @@ save_config() {
 }
 
 check_latest_plugins() {
-    echo -e "${CYAN}Checking latest versions of CookieRTMPS plugins (skipping OS apt-get updates/upgrades)...${NC}"
+    echo -e "${CYAN}Checking latest versions of active CookieRTMPS plugins (skipping OS apt-get updates/upgrades)...${NC}"
 
-    # Check latest NOALBS release tag
-    local noalbs_tag
-    noalbs_tag=$(curl -fsSL --max-time 5 "https://api.github.com/repos/NOALBS/nginx-obs-automatic-low-bitrate-switching/releases/latest" 2>/dev/null \
-        | grep -m 1 '"tag_name"' | sed -E 's/.*"tag_name":[[:space:]]*"([^"]+)".*/\1/' || true)
-    if [ -n "$noalbs_tag" ]; then
-        LATEST_NOALBS_VERSION="$noalbs_tag"
-        echo -e "  ${GREEN}NOALBS latest release:${NC} $LATEST_NOALBS_VERSION"
+    # Only check NOALBS release tag when disconnection protection is enabled
+    if [ "$NOALBS_ENABLED" == "true" ]; then
+        local noalbs_tag
+        noalbs_tag=$(curl -fsSL --max-time 5 "https://api.github.com/repos/NOALBS/nginx-obs-automatic-low-bitrate-switching/releases/latest" 2>/dev/null \
+            | grep -m 1 '"tag_name"' | sed -E 's/.*"tag_name":[[:space:]]*"([^"]+)".*/\1/' || true)
+        if [ -n "$noalbs_tag" ]; then
+            LATEST_NOALBS_VERSION="$noalbs_tag"
+            echo -e "  ${GREEN}NOALBS latest release:${NC} $LATEST_NOALBS_VERSION"
+        else
+            echo -e "  ${YELLOW}NOALBS latest release:${NC} Could not query GitHub (using Dockerfile default)"
+        fi
     else
-        echo -e "  ${YELLOW}NOALBS latest release:${NC} Could not query GitHub (using Dockerfile default)"
+        LATEST_NOALBS_VERSION=""
+        echo -e "  ${YELLOW}NOALBS / OBS:${NC} Skipped (Disconnection protection disabled)"
     fi
 
     # Check latest nginx-rtmp-module release/tag
@@ -998,7 +1098,8 @@ configure_whitelist() {
                     echo -e "${RED}Failed to auto-detect server/VPN IP ranges.${NC}"
                 fi
                 save_config
-                sync_obs_container_whitelist
+                sync_container_nginx_whitelist "cookie-rtmps"
+                [ "$NOALBS_ENABLED" == "true" ] && sync_obs_container_whitelist
                 sleep 1
                 ;;
             2)
@@ -1007,10 +1108,11 @@ configure_whitelist() {
                 ip_input=$(echo "$ip_input" | tr -d ' ')
                 if [ -n "$ip_input" ]; then
                     WHITELIST_MODE="manual"
-                    ACCEPTED_IP="$ip_input"
+                    ACCEPTED_IP=$(ensure_localhost_in_whitelist "$ip_input")
                     echo -e "${GREEN}IP Whitelist updated to: $ACCEPTED_IP${NC}"
                     save_config
-                    sync_obs_container_whitelist
+                    sync_container_nginx_whitelist "cookie-rtmps"
+                    [ "$NOALBS_ENABLED" == "true" ] && sync_obs_container_whitelist
                 fi
                 sleep 1
                 ;;
@@ -1019,7 +1121,8 @@ configure_whitelist() {
                 ACCEPTED_IP=""
                 echo -e "${GREEN}IP Whitelist disabled. All IPs allowed.${NC}"
                 save_config
-                sync_obs_container_whitelist
+                sync_container_nginx_whitelist "cookie-rtmps"
+                [ "$NOALBS_ENABLED" == "true" ] && sync_obs_container_whitelist
                 sleep 1
                 ;;
             4) break ;;
@@ -1033,10 +1136,22 @@ ensure_brb_video_transcoded() {
     local target="./data/brb_video.mp4"
     [ -z "$url" ] && url="https://filedn.com/lfh40bKbFfD5um9HDFNrJFR/brb.mp4"
     mkdir -p ./data
-    rm -f "$target"
+    rm -f "$target" "${target}.tmp"
     echo -e "${YELLOW}Downloading BRB video from $url ...${NC}"
-    curl -L "$url" -o "${target}.tmp"
+    if ! curl -fsSL --max-time 60 "$url" -o "${target}.tmp"; then
+        echo -e "${RED}Download failed (HTTP error or unreachable URL): $url${NC}"
+        rm -f "${target}.tmp"
+        return 1
+    fi
+
     if [ -f "${target}.tmp" ] && [ -s "${target}.tmp" ]; then
+        # Guard against HTML error pages saved as .mp4
+        if head -c 512 "${target}.tmp" 2>/dev/null | grep -qiE '<!doctype html|<html'; then
+            echo -e "${RED}Downloaded file appears to be an HTML page, not a direct MP4 video.${NC}"
+            rm -f "${target}.tmp"
+            return 1
+        fi
+
         if command -v ffmpeg &> /dev/null; then
             echo -e "${YELLOW}Transcoding BRB video with FFmpeg for RTMP server-side loop playback (H.264 30fps / AAC 48kHz)...${NC}"
             local duration=""
@@ -1075,30 +1190,39 @@ ensure_brb_video_transcoded() {
             echo ""
 
             if [ -f "$target" ] && [ -s "$target" ]; then
+                chmod 644 "$target" 2>/dev/null || true
                 echo -e "${GREEN}BRB video successfully downloaded and transcoded for zero-reencode RTMP looping.${NC}"
                 rm -f "${target}.tmp"
             else
                 echo -e "${YELLOW}FFmpeg transcode warning. Using downloaded file directly.${NC}"
                 mv "${target}.tmp" "$target"
+                chmod 644 "$target" 2>/dev/null || true
             fi
         else
             echo -e "${YELLOW}FFmpeg not found on host; using downloaded MP4 directly (container FFmpeg will handle playback).${NC}"
             mv "${target}.tmp" "$target"
+            chmod 644 "$target" 2>/dev/null || true
         fi
     else
-        echo -e "${RED}Download failed.${NC}"
+        echo -e "${RED}Download failed (empty file).${NC}"
         rm -f "${target}.tmp"
+        return 1
     fi
 }
 
 configure_noalbs() {
     while true; do
         clear
-        echo -e "${GREEN}=== NOALBS & Server-Side BRB Protection ===${NC}"
-        echo -e "Status:        $([ "$NOALBS_ENABLED" == "true" ] && echo -e "${GREEN}ENABLED${NC}" || echo -e "${RED}DISABLED${NC}")"
-        echo -e "Fallback Mode: ${CYAN}${FALLBACK_MODE:-video}${NC} ($([ "$FALLBACK_MODE" == "obs" ] && echo "OBS WebSocket Scene Switch" || echo "Server-Side MP4 Loop / Cloud BRB"))"
+        echo -e "${GREEN}=== NOALBS & Disconnection Protection ===${NC}"
+        if [ "$NOALBS_ENABLED" == "true" ]; then
+            echo -e "Status:        ${GREEN}ENABLED${NC}"
+            echo -e "Fallback Mode: ${CYAN}${FALLBACK_MODE:-video}${NC} ($([ "$FALLBACK_MODE" == "obs" ] && echo "OBS WebSocket Scene Switch" || echo "Server-Side MP4 Loop / Cloud BRB"))"
+            echo -e "${YELLOW}Note: After changing settings here, run Option 9 (Build & Start Server) to apply them.${NC}"
+        else
+            echo -e "Status:        ${RED}DISABLED${NC} (Pure RTMP passthrough — NOALBS, OBS & BRB components will NOT be installed)"
+        fi
         echo ""
-        echo "1) Toggle Enabled (Currently: $NOALBS_ENABLED)"
+        echo "1) Toggle Disconnection Protection (Currently: $NOALBS_ENABLED)"
         echo "2) Primary Fallback Mode (Current: ${FALLBACK_MODE:-video} [video = Server-Side MP4, obs = OBS Scene Switch])"
         echo "3) OBS WebSocket Host (Current: $OBS_WS_HOST)"
         echo "4) OBS WebSocket Port (Current: $OBS_WS_PORT)"
@@ -1110,7 +1234,8 @@ configure_noalbs() {
         echo "10) Toggle Cloud BRB Server-Side MP4 (Currently: $CLOUD_BRB)"
         echo "11) Configure BRB Video URL (Current: ${BRB_VIDEO_URL:-(Default)})"
         echo "12) Disconnection Protection Duration (Current: ${CLOUD_BRB_TIMEOUT} seconds)"
-        echo "13) Back to Main Menu"
+        echo "13) Run Disconnection Protection Health Check"
+        echo "14) Back to Main Menu"
         echo -e "Select an option: \c"
         read -r noalbs_opt
 
@@ -1118,11 +1243,16 @@ configure_noalbs() {
             1)
                 if [ "$NOALBS_ENABLED" == "true" ]; then
                     NOALBS_ENABLED="false"
+                    CLOUD_BRB="false"
+                    echo -e "${YELLOW}Disconnection protection DISABLED.${NC}"
+                    echo -e "${YELLOW}NOALBS, OBS, and BRB components will NOT be installed; server will run pure RTMP relay.${NC}"
+                    sleep 2
                 else
                     NOALBS_ENABLED="true"
                     if [ "$FALLBACK_MODE" == "video" ]; then
                         CLOUD_BRB="true"
-                        echo -e "${GREEN}NOALBS enabled with Server-Side MP4 (Cloud BRB automatically enabled).${NC}"
+                        [ -z "$BRB_VIDEO_URL" ] && BRB_VIDEO_URL="https://filedn.com/lfh40bKbFfD5um9HDFNrJFR/brb.mp4"
+                        echo -e "${GREEN}Disconnection protection ENABLED with Server-Side MP4 (Cloud BRB enabled).${NC}"
                         sleep 1
                     fi
                 fi
@@ -1131,8 +1261,8 @@ configure_noalbs() {
             2)
                 if [ "$FALLBACK_MODE" == "obs" ]; then
                     FALLBACK_MODE="video"
-                    CLOUD_BRB="true"
-                    echo -e "${GREEN}Primary Fallback Mode switched to: video (Server-Side MP4 / Cloud BRB enabled)${NC}"
+                    [ "$NOALBS_ENABLED" == "true" ] && CLOUD_BRB="true"
+                    echo -e "${GREEN}Primary Fallback Mode switched to: video (Server-Side MP4 / Cloud BRB)${NC}"
                 else
                     FALLBACK_MODE="obs"
                     echo -e "${GREEN}Primary Fallback Mode switched to: obs (OBS WebSocket Scene Switch)${NC}"
@@ -1140,7 +1270,7 @@ configure_noalbs() {
                 save_config
                 sleep 1
                 ;;
-            3) echo -e "Enter OBS WebSocket Host (e.g. 192.168.1.50 or host.docker.internal):"; read -r input; [ -n "$input" ] && { OBS_WS_HOST="$input"; save_config; } ;;
+            3) echo -e "Enter OBS WebSocket Host (e.g. host.docker.internal or 192.168.1.50):"; read -r input; [ -n "$input" ] && { OBS_WS_HOST="$input"; save_config; } ;;
             4) echo -e "Enter OBS WebSocket Port (Default: 4455):"; read -r input; [ -n "$input" ] && { OBS_WS_PORT="$input"; save_config; } ;;
             5) echo -e "Enter OBS WebSocket Password:"; read -r input; OBS_WS_PASSWORD="$input"; save_config ;;
             6) echo -e "Enter OBS Main Scene Name (e.g. 'Main' or 'Streaming'):"; read -r input; [ -n "$input" ] && { OBS_SCENE_LIVE="$input"; save_config; } ;;
@@ -1176,7 +1306,12 @@ configure_noalbs() {
                     sleep 1
                 fi
                 ;;
-            13) break ;;
+            13)
+                verify_disconnection_protection
+                echo -e "\nPress Enter to continue..."
+                read -r
+                ;;
+            14) break ;;
             *) echo -e "${RED}Invalid option${NC}"; sleep 1 ;;
         esac
     done
@@ -1296,24 +1431,42 @@ build_and_run() {
         return
     fi
 
-    # Refresh auto whitelist (Server IP + WireGuard/OpenVPN ranges) before container launch
+    # Refresh auto whitelist (Server IP + WireGuard/OpenVPN ranges) or ensure localhost is included in manual mode
     if [ "$WHITELIST_MODE" == "auto" ]; then
         ACCEPTED_IP=$(build_default_whitelist)
         save_config
         echo -e "${GREEN}Auto IP Whitelist active:${NC} $ACCEPTED_IP"
+    elif [ -n "$ACCEPTED_IP" ]; then
+        ACCEPTED_IP=$(ensure_localhost_in_whitelist "$ACCEPTED_IP")
+        save_config
     fi
 
-    # Keep Cloud BRB synced when NOALBS is enabled in server-side video mode
-    if [ "$NOALBS_ENABLED" == "true" ] && [ "$FALLBACK_MODE" == "video" ] && [ "$CLOUD_BRB" != "true" ]; then
-        CLOUD_BRB="true"
-        save_config
+    # Determine whether disconnection protection is enabled or running pure RTMP passthrough
+    local INSTALL_PROTECTION="false"
+    if [ "$NOALBS_ENABLED" == "true" ]; then
+        INSTALL_PROTECTION="true"
+        if [ "$FALLBACK_MODE" == "video" ] && [ "$CLOUD_BRB" != "true" ]; then
+            CLOUD_BRB="true"
+            save_config
+        fi
+    else
+        CLOUD_BRB="false"
+        echo -e "${CYAN}Disconnection protection is DISABLED.${NC}"
+        echo -e "${CYAN}Skipping NOALBS, OBS, and Cloud BRB installation — starting pure RTMP/RTMPS relay.${NC}"
     fi
 
     echo -e "${YELLOW}Checking and removing old containers, port conflicts, and stale files...${NC}"
     local OLD_CONTAINERS OLD_VOLUMES
-    OLD_CONTAINERS=$(docker ps -a --format '{{.ID}} {{.Names}} {{.Image}}' | grep -iE 'rtmp|rtmps|cookie|prism|nginx-rtmp' | awk '{print $1}' | sort -u)
+    if [ "$INSTALL_PROTECTION" == "true" ]; then
+        OLD_CONTAINERS=$(docker ps -a --format '{{.ID}} {{.Names}} {{.Image}}' | grep -iE 'rtmp|rtmps|cookie|prism|nginx-rtmp' | grep -vi 'cookie-rtmps-obs' | awk '{print $1}' | sort -u)
+    else
+        OLD_CONTAINERS=$(docker ps -a --format '{{.ID}} {{.Names}} {{.Image}}' | grep -iE 'rtmp|rtmps|cookie|prism|nginx-rtmp|noalbs|obs' | awk '{print $1}' | sort -u)
+    fi
     if [ -n "$OLD_CONTAINERS" ]; then
         docker rm -v -f $OLD_CONTAINERS 2>/dev/null || true
+    fi
+    if [ "$INSTALL_PROTECTION" != "true" ]; then
+        docker rm -v -f cookie-rtmps-obs noalbs 2>/dev/null || true
     fi
     OLD_VOLUMES=$(docker volume ls -q | grep -iE 'rtmp|rtmps|cookie|prism' || true)
     if [ -n "$OLD_VOLUMES" ]; then
@@ -1387,8 +1540,9 @@ build_and_run() {
     fi
 
     mkdir -p ./data
-    if [ "$NOALBS_ENABLED" == "true" ] && { [ "$CLOUD_BRB" == "true" ] || [ "$FALLBACK_MODE" == "video" ]; }; then
-        if [ -f "./data/brb_video.mp4" ] && [ -s "./data/brb_video.mp4" ]; then
+    if [ "$INSTALL_PROTECTION" == "true" ] && { [ "$CLOUD_BRB" == "true" ] || [ "$FALLBACK_MODE" == "video" ]; }; then
+        if [ -f "./data/brb_video.mp4" ] && [ -s "./data/brb_video.mp4" ] && ! head -c 512 "./data/brb_video.mp4" 2>/dev/null | grep -qiE '<!doctype html|<html'; then
+            chmod 644 "./data/brb_video.mp4" 2>/dev/null || true
             echo -e "${GREEN}Existing BRB video found at ./data/brb_video.mp4. Preserving video source.${NC}"
         else
             if [ -z "$BRB_VIDEO_URL" ]; then
@@ -1407,7 +1561,13 @@ build_and_run() {
 
     local BUILD_ARGS=()
     if [ -f "$SCRIPT_DIR/Dockerfile" ]; then
-        if [ -n "$LATEST_NOALBS_VERSION" ] && grep -qE '^ARG[[:space:]]+NOALBS_VERSION' "$SCRIPT_DIR/Dockerfile"; then
+        if grep -qE '^ARG[[:space:]]+INSTALL_NOALBS' "$SCRIPT_DIR/Dockerfile"; then
+            BUILD_ARGS+=(--build-arg "INSTALL_NOALBS=$INSTALL_PROTECTION")
+        fi
+        if grep -qE '^ARG[[:space:]]+INSTALL_OBS' "$SCRIPT_DIR/Dockerfile"; then
+            BUILD_ARGS+=(--build-arg "INSTALL_OBS=$INSTALL_PROTECTION")
+        fi
+        if [ "$INSTALL_PROTECTION" == "true" ] && [ -n "$LATEST_NOALBS_VERSION" ] && grep -qE '^ARG[[:space:]]+NOALBS_VERSION' "$SCRIPT_DIR/Dockerfile"; then
             BUILD_ARGS+=(--build-arg "NOALBS_VERSION=$LATEST_NOALBS_VERSION")
         fi
         if [ -n "$LATEST_NGINX_RTMP_VERSION" ] && grep -qE '^ARG[[:space:]]+NGINX_RTMP_VERSION' "$SCRIPT_DIR/Dockerfile"; then
@@ -1444,17 +1604,34 @@ build_and_run() {
         -e "OBS_KEY=$OBS_KEY" -e "APP_NAME=$APP_NAME" -e "ACCEPTED_IP=$ACCEPTED_IP"
         -e "CHUNK_SIZE=$CHUNK_SIZE" -e "SERVER_DOMAIN=$SERVER_DOMAIN"
         -e "STREAM_BASE_TITLE=" -e "TWITCH_CLIENT_ID=" -e "TWITCH_OAUTH_TOKEN=" -e "TWITCH_BROADCASTER_ID="
-        -e "NOALBS_ENABLED=$NOALBS_ENABLED" -e "FALLBACK_MODE=$FALLBACK_MODE"
-        -e "OBS_WS_HOST=$OBS_WS_HOST" -e "OBS_WS_PORT=$OBS_WS_PORT" -e "OBS_WS_PASSWORD=$OBS_WS_PASSWORD"
-        -e "OBS_SCENE_LIVE=$OBS_SCENE_LIVE" -e "OBS_SCENE_BRB=$OBS_SCENE_BRB"
-        -e "LOW_BITRATE=$LOW_BITRATE" -e "RESTORE_BITRATE=$RESTORE_BITRATE"
-        -e "CLOUD_BRB=$CLOUD_BRB" -e "CLOUD_BRB_TIMEOUT=$CLOUD_BRB_TIMEOUT"
-        -e "BRB_VIDEO_URL=$BRB_VIDEO_URL" -e "BRB_VIDEO_PATH=/app/data/brb_video.mp4"
     )
+
+    local EXTRA_DOCKER_ARGS=()
+    if [ "$INSTALL_PROTECTION" == "true" ]; then
+        EXTRA_DOCKER_ARGS+=(--add-host=host.docker.internal:host-gateway)
+        ENV_ARGS+=(
+            -e "NOALBS_ENABLED=true" -e "FALLBACK_MODE=$FALLBACK_MODE"
+            -e "OBS_WS_HOST=$OBS_WS_HOST" -e "OBS_WS_PORT=$OBS_WS_PORT" -e "OBS_WS_PASSWORD=$OBS_WS_PASSWORD"
+            -e "OBS_SCENE_LIVE=$OBS_SCENE_LIVE" -e "OBS_SCENE_BRB=$OBS_SCENE_BRB"
+            -e "LOW_BITRATE=$LOW_BITRATE" -e "RESTORE_BITRATE=$RESTORE_BITRATE"
+            -e "CLOUD_BRB=$CLOUD_BRB" -e "CLOUD_BRB_TIMEOUT=$CLOUD_BRB_TIMEOUT"
+            -e "BRB_VIDEO_URL=$BRB_VIDEO_URL" -e "BRB_VIDEO_PATH=/app/data/brb_video.mp4"
+        )
+    else
+        ENV_ARGS+=(
+            -e "NOALBS_ENABLED=false" -e "FALLBACK_MODE=none"
+            -e "OBS_WS_HOST=" -e "OBS_WS_PORT=" -e "OBS_WS_PASSWORD="
+            -e "OBS_SCENE_LIVE=" -e "OBS_SCENE_BRB="
+            -e "LOW_BITRATE=0" -e "RESTORE_BITRATE=0"
+            -e "CLOUD_BRB=false" -e "CLOUD_BRB_TIMEOUT=0"
+            -e "BRB_VIDEO_URL=" -e "BRB_VIDEO_PATH="
+        )
+    fi
 
     docker run -d --name cookie-rtmps \
         -p "${PORT_RTMP}:1935" \
         --restart unless-stopped \
+        "${EXTRA_DOCKER_ARGS[@]}" \
         "${ENV_ARGS[@]}" \
         -v "$(pwd)/data:/app/data" \
         cookie-rtmps
@@ -1462,14 +1639,24 @@ build_and_run() {
     if [ $? -eq 0 ]; then
         local DISPLAY_HOST=${SERVER_DOMAIN:-$(get_server_ip)}
         echo -e "${GREEN}Container 'cookie-rtmps' is running!${NC}"
-        echo -e "You can stream to: rtmp://${DISPLAY_HOST}:${PORT_RTMP}/${APP_NAME}"
-        echo -e "Vertical stream:  rtmp://${DISPLAY_HOST}:${PORT_RTMP}/vertical"
+        sleep 2
 
-        sync_obs_container_whitelist
+        # Ensure comma-separated whitelist rules (including 127.0.0.1) are properly applied inside cookie-rtmps
+        sync_container_nginx_whitelist "cookie-rtmps"
+
+        if [ "$INSTALL_PROTECTION" == "true" ]; then
+            echo -e "${CYAN}Mode:${NC} Disconnection Protection ENABLED (${FALLBACK_MODE})"
+            sync_obs_container_whitelist
+            verify_disconnection_protection
+        else
+            echo -e "${GREEN}Mode:${NC} Pure RTMP/RTMPS Passthrough (NOALBS/OBS/BRB disabled)"
+        fi
+        echo -e "\nYou can stream to: rtmp://${DISPLAY_HOST}:${PORT_RTMP}/${APP_NAME}"
+        echo -e "Vertical stream:  rtmp://${DISPLAY_HOST}:${PORT_RTMP}/vertical"
 
         if [ -f "./integration_test.sh" ]; then
             echo -e "${YELLOW}Running integration tests...${NC}"
-            sleep 2
+            sleep 1
             chmod +x ./integration_test.sh
             ./integration_test.sh
         fi
@@ -1578,11 +1765,11 @@ stop_and_uninstall() {
 
     if command -v docker &> /dev/null; then
         local OLD_CONTAINERS
-        OLD_CONTAINERS=$(docker ps -a --format '{{.ID}} {{.Names}} {{.Image}} {{.Labels}}' | grep -iE 'rtmp|rtmps|cookie|prism|nginx-rtmp' | awk '{print $1}' | sort -u)
+        OLD_CONTAINERS=$(docker ps -a --format '{{.ID}} {{.Names}} {{.Image}} {{.Labels}}' | grep -iE 'rtmp|rtmps|cookie|prism|nginx-rtmp|noalbs|obs' | awk '{print $1}' | sort -u)
         if [ -n "$OLD_CONTAINERS" ]; then
             docker rm -v -f $OLD_CONTAINERS 2>/dev/null && echo -e "${GREEN}RTMP/RTMPS containers and volumes removed.${NC}" || true
         else
-            docker rm -v -f cookie-rtmps 2>/dev/null || true
+            docker rm -v -f cookie-rtmps cookie-rtmps-obs 2>/dev/null || true
         fi
     fi
 
@@ -1628,6 +1815,11 @@ while true; do
     echo -e "  RTMP Ingest:     rtmp://${DISPLAY_HOST}:${PORT_RTMP}/${APP_NAME}"
     echo -e "  Vertical Ingest: rtmp://${DISPLAY_HOST}:${PORT_RTMP}/vertical"
     echo -e "  IP Whitelist:    ${WHITELIST_MODE} (${ACCEPTED_IP:-Allow All})"
+    if [ "$NOALBS_ENABLED" == "true" ]; then
+        echo -e "  Protection:      ${GREEN}ENABLED${NC} (NOALBS / ${FALLBACK_MODE})"
+    else
+        echo -e "  Protection:      ${YELLOW}DISABLED${NC} (Pure RTMP Passthrough — No OBS/NOALBS)"
+    fi
     echo "-------------------------------------"
     echo "1) Install Docker (if not installed)"
     echo "2) Configure Stream Keys (Horizontal)"
@@ -1636,7 +1828,7 @@ while true; do
     echo "5) Configure IP Whitelist (Auto VPN/WireGuard + Server IP)"
     echo "6) Configure Domain / Reverse Proxy (Optional)"
     echo "7) Configure Optimizations (Chunk Size)"
-    echo "8) Configure NOALBS & Server-Side BRB Protection"
+    echo "8) Configure NOALBS & Disconnection Protection"
     echo "9) Build & Start Server"
     echo "10) Run Integration Tests"
     echo "11) Stop Server & Uninstall"
@@ -1655,7 +1847,21 @@ while true; do
         7) configure_optimizations ;;
         8) configure_noalbs ;;
         9) build_and_run ;;
-        10) sync_obs_container_whitelist; if [ -f "./integration_test.sh" ]; then chmod +x ./integration_test.sh; ./integration_test.sh; else echo -e "${RED}Test script not found.${NC}"; fi; echo -e "Press Enter to continue..."; read -r ;;
+        10)
+            sync_container_nginx_whitelist "cookie-rtmps"
+            if [ "$NOALBS_ENABLED" == "true" ]; then
+                sync_obs_container_whitelist
+                verify_disconnection_protection
+            fi
+            if [ -f "./integration_test.sh" ]; then
+                chmod +x ./integration_test.sh
+                ./integration_test.sh
+            else
+                echo -e "${RED}Test script not found.${NC}"
+            fi
+            echo -e "Press Enter to continue..."
+            read -r
+            ;;
         11) stop_and_uninstall ;;
         12) view_logs ;;
         13) clear; echo -e "${GREEN}Goodbye!${NC}"; break ;;
