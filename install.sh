@@ -1290,7 +1290,7 @@ DOCKERFILE_EOF
   <script>
     (function () {
       const params = new URLSearchParams(window.location.search);
-      const src = params.get("src") || "https://filedn.com/lfh40bKbFfD5um9HDFNrJFR/brb.mp4";
+      const remoteSrc = params.get("src") || "https://filedn.com/lfh40bKbFfD5um9HDFNrJFR/brb.mp4";
       const loopParam = (params.get("loop") || "true").toLowerCase();
       const shouldLoop = loopParam === "true" || loopParam === "1";
       const video = document.getElementById("brbVideo");
@@ -1298,8 +1298,20 @@ DOCKERFILE_EOF
       video.loop = shouldLoop;
       video.muted = false;
       video.volume = 1.0;
-      video.src = src;
 
+      let usedRemoteFallback = false;
+      video.onerror = function () {
+        if (!usedRemoteFallback) {
+          usedRemoteFallback = true;
+          video.src = remoteSrc;
+          video.play().catch(function () {
+            video.muted = true;
+            video.play().catch(function () {});
+          });
+        }
+      };
+
+      video.src = "/brb_media.mp4";
       video.play().catch(function () {
         video.muted = true;
         video.play().catch(function () {});
@@ -1549,8 +1561,8 @@ if has_obs_browser:
         "private_settings": {},
     }
 else:
-    # close_when_inactive=True prevents background decoding during 'main' AND opens a fresh
-    # HTTPS connection to BRB_VIDEO_URL the instant OBS switches to 'brb'.
+    # Default to network mode for direct remote MP4 streaming; noalbs_controller upgrades to
+    # raw cached /tmp/brb_media.mp4 (zero transcoding) for seamless local looping once ready.
     brb_source_def = {
         "prev_ver": 503316480,
         "name": "BRB_Browser_Source",
@@ -1558,8 +1570,10 @@ else:
         "id": "ffmpeg_source",
         "versioned_id": "ffmpeg_source",
         "settings": {
-            "is_local_file": True,
-            "local_file": BRB_VIDEO_URL,
+            "is_local_file": False,
+            "input": BRB_VIDEO_URL,
+            "buffering_mb": 2,
+            "reconnect_delay_sec": 1,
             "looping": should_loop,
             "restart_on_activate": True,
             "clear_on_media_end": False,
@@ -1802,6 +1816,10 @@ http {{
         location = /brb.html {{
             alias /opt/obs-bridge/brb.html;
         }}
+
+        location = /brb_media.mp4 {{
+            alias /tmp/brb_media.mp4;
+        }}
     }}
 }}
 """
@@ -1837,6 +1855,14 @@ BRB_VIDEO_URL = os.environ.get("BRB_VIDEO_URL", "https://filedn.com/lfh40bKbFfD5
 BRB_VIDEO_LOOP = os.environ.get("BRB_VIDEO_LOOP", "true").lower() == "true"
 CLOUD_BRB_TIMEOUT = int(os.environ.get("CLOUD_BRB_TIMEOUT", "300"))
 WS_CONFIG_PATH = "/root/.config/obs-studio/plugin_config/obs-websocket/config.json"
+BRB_CACHE_PATH = "/tmp/brb_media.mp4"
+
+
+def has_cached_brb_file():
+    try:
+        return os.path.isfile(BRB_CACHE_PATH) and os.path.getsize(BRB_CACHE_PATH) > 1024
+    except OSError:
+        return False
 
 
 def load_effective_ws_password(configured_password):
@@ -1858,10 +1884,10 @@ def get_ingest_stats():
         root = ET.fromstring(xml_data)
         for app in root.findall(".//application"):
             name_el = app.find("name")
-            if name_el is not None and name_el.text == APP_NAME:
+            if name_el is not None and (name_el.text or "").strip() == APP_NAME:
                 live = app.find("live")
                 if live is None:
-                    return False, 0.0, 0, ""
+                    return False, 0.0, None, ""
                 for stream in live.findall("stream"):
                     is_pub = (stream.find("publishing") is not None) or any(
                         c.find("publishing") is not None for c in stream.findall("client")
@@ -1871,12 +1897,12 @@ def get_ingest_stats():
                         bytes_el = stream.find("bytes_in")
                         sname_el = stream.find("name")
                         bw_bps = float(bw_el.text) if (bw_el is not None and bw_el.text) else 0.0
-                        bytes_in = int(bytes_el.text) if (bytes_el is not None and bytes_el.text) else 0
-                        sname = sname_el.text.strip() if (sname_el is not None and sname_el.text) else ""
+                        bytes_in = int(bytes_el.text) if (bytes_el is not None and bytes_el.text) else None
+                        sname = (sname_el.text or "").strip() if sname_el is not None else ""
                         return True, bw_bps / 1000.0, bytes_in, sname
-        return False, 0.0, 0, ""
+        return False, 0.0, None, ""
     except Exception:
-        return False, 0.0, 0, ""
+        return False, 0.0, None, ""
 
 
 def drop_ingest_publisher():
@@ -1905,6 +1931,9 @@ class BitrateTracker:
             self.reset()
             return 0.0
 
+        if bytes_in is None:
+            return bw_in_kbps
+
         if self.prev_bytes is None or bytes_in < self.prev_bytes:
             self.prev_bytes = bytes_in
             self.prev_ts = now
@@ -1923,7 +1952,9 @@ class OBSClient:
         self.uri = f"ws://{host}:{port}"
         self.password = password
         self.ws = None
-        self.brb_use_network_mode = False
+        self.brb_mode = None
+        self.brb_last_restart_at = 0.0
+        self.brb_stall_since = None
 
     async def close(self):
         if self.ws is not None:
@@ -1935,8 +1966,8 @@ class OBSClient:
 
     async def connect(self):
         await self.close()
-        self.ws = await websockets.connect(self.uri, ping_interval=15, ping_timeout=15)
-        hello_raw = await asyncio.wait_for(self.ws.recv(), timeout=5.0)
+        self.ws = await websockets.connect(self.uri, ping_interval=20, ping_timeout=20)
+        hello_raw = await asyncio.wait_for(self.ws.recv(), timeout=10.0)
         hello = json.loads(hello_raw)
         auth_obj = hello.get("d", {}).get("authentication")
         identify_d = {"rpcVersion": 1, "eventSubscriptions": 0}
@@ -1946,8 +1977,8 @@ class OBSClient:
             secret = base64.b64encode(secret_hash).decode("utf-8")
             auth_hash = hashlib.sha256((secret + auth_obj["challenge"]).encode("utf-8")).digest()
             identify_d["authentication"] = base64.b64encode(auth_hash).decode("utf-8")
-        await asyncio.wait_for(self.ws.send(json.dumps({"op": 1, "d": identify_d})), timeout=5.0)
-        identified_raw = await asyncio.wait_for(self.ws.recv(), timeout=5.0)
+        await asyncio.wait_for(self.ws.send(json.dumps({"op": 1, "d": identify_d})), timeout=10.0)
+        identified_raw = await asyncio.wait_for(self.ws.recv(), timeout=10.0)
         identified = json.loads(identified_raw)
         if identified.get("op") != 2:
             raise RuntimeError(f"OBS WebSocket identify failed: {identified}")
@@ -1965,8 +1996,8 @@ class OBSClient:
         }
         if request_data is not None:
             payload["d"]["requestData"] = request_data
-        await asyncio.wait_for(self.ws.send(json.dumps(payload)), timeout=5.0)
-        deadline = time.monotonic() + 5.0
+        await asyncio.wait_for(self.ws.send(json.dumps(payload)), timeout=10.0)
+        deadline = time.monotonic() + 10.0
         while True:
             remaining = max(0.1, deadline - time.monotonic())
             msg = json.loads(await asyncio.wait_for(self.ws.recv(), timeout=remaining))
@@ -1987,16 +2018,16 @@ class OBSClient:
         if current != scene_name:
             raise RuntimeError(f"Scene switch verification failed: expected '{scene_name}', got '{current}'")
 
-    async def is_streaming(self):
-        res = await self.call("GetStreamStatus")
-        return bool(res.get("responseData", {}).get("outputActive", False))
-
     async def ensure_streaming(self):
-        if not await self.is_streaming():
+        res = await self.call("GetStreamStatus", allow_error=True)
+        data = res.get("responseData", {})
+        if not data.get("outputActive", False) and not data.get("outputReconnecting", False):
             await self.call("StartStream", allow_error=True)
 
     async def ensure_stopped(self):
-        if await self.is_streaming():
+        res = await self.call("GetStreamStatus", allow_error=True)
+        data = res.get("responseData", {})
+        if data.get("outputActive", False) or data.get("outputReconnecting", False):
             await self.call("StopStream", allow_error=True)
 
     async def restart_rtmp_source(self, active_stream_name):
@@ -2023,50 +2054,116 @@ class OBSClient:
             allow_error=True,
         )
 
-    async def ensure_brb_playing(self, force_restart=False):
-        """Guarantees BRB MP4 is actively playing and looping while on the BRB scene."""
+    async def configure_brb_source(self, mode):
+        """Apply BRB source input settings before activating the BRB scene (avoids restart storms)."""
+        if mode == "local_cache":
+            input_settings = {
+                "is_local_file": True,
+                "local_file": BRB_CACHE_PATH,
+                "looping": BRB_VIDEO_LOOP,
+                "restart_on_activate": True,
+                "close_when_inactive": True,
+                "clear_on_media_end": False,
+            }
+        else:
+            input_settings = {
+                "is_local_file": False,
+                "input": BRB_VIDEO_URL,
+                "buffering_mb": 2,
+                "reconnect_delay_sec": 1,
+                "restart_on_activate": True,
+                "close_when_inactive": True,
+                "clear_on_media_end": False,
+            }
+        await self.call(
+            "SetInputSettings",
+            {
+                "inputName": "BRB_Browser_Source",
+                "inputSettings": input_settings,
+                "overlay": True,
+            },
+            allow_error=True,
+        )
+        self.brb_mode = mode
+        self.brb_last_restart_at = time.monotonic()
+        self.brb_stall_since = None
+
+    async def activate_brb_scene(self):
+        """Configure BRB source cleanly, switch to BRB scene, and verify playback starts."""
+        preferred_mode = "local_cache" if has_cached_brb_file() else "remote_stream"
+        # Check if BRB_Browser_Source is an ffmpeg_source (has GetMediaInputStatus) or browser_source
+        status_resp = await self.call(
+            "GetMediaInputStatus",
+            {"inputName": "BRB_Browser_Source"},
+            allow_error=True,
+        )
+        is_media_source = status_resp.get("requestStatus", {}).get("result", False)
+
+        if is_media_source:
+            await self.configure_brb_source(preferred_mode)
+            await self.set_scene(OBS_SCENE_BRB)
+            await self.ensure_streaming()
+            print(f"[NOALBS] BRB scene active (mode={preferred_mode}, loop={BRB_VIDEO_LOOP}).", flush=True)
+        else:
+            await self.set_scene(OBS_SCENE_BRB)
+            await self.ensure_streaming()
+            await self.call(
+                "PressInputPropertiesButton",
+                {"inputName": "BRB_Browser_Source", "propertyName": "refreshnocache"},
+                allow_error=True,
+            )
+            print(f"[NOALBS] BRB scene active (mode=browser_source, loop={BRB_VIDEO_LOOP}).", flush=True)
+
+    async def watchdog_brb_playback(self):
+        """Keep BRB video looping & playing without interrupting OPENING/BUFFERING handshakes."""
+        now = time.monotonic()
         status_resp = await self.call(
             "GetMediaInputStatus",
             {"inputName": "BRB_Browser_Source"},
             allow_error=True,
         )
         if not status_resp.get("requestStatus", {}).get("result", False):
-            if force_restart:
-                await self.call(
-                    "PressInputPropertiesButton",
-                    {"inputName": "BRB_Browser_Source", "propertyName": "refreshnocache"},
-                    allow_error=True,
-                )
             return
 
         media_state = status_resp.get("responseData", {}).get("mediaState", "")
-        if media_state == "OBS_MEDIA_STATE_ERROR":
-            self.brb_use_network_mode = not self.brb_use_network_mode
 
-        if force_restart or media_state in ("OBS_MEDIA_STATE_ENDED", "OBS_MEDIA_STATE_STOPPED", "OBS_MEDIA_STATE_ERROR", "OBS_MEDIA_STATE_NONE"):
-            if self.brb_use_network_mode:
-                input_settings = {
-                    "is_local_file": False,
-                    "input": BRB_VIDEO_URL,
-                    "buffering_mb": 2,
-                    "reconnect_delay_sec": 1,
-                }
-            else:
-                input_settings = {
-                    "is_local_file": True,
-                    "local_file": BRB_VIDEO_URL,
-                    "looping": BRB_VIDEO_LOOP,
-                }
+        # Healthy active states: reset stall timer
+        if media_state in ("OBS_MEDIA_STATE_PLAYING", "OBS_MEDIA_STATE_OPENING", "OBS_MEDIA_STATE_BUFFERING"):
+            self.brb_stall_since = None
+            return
 
-            await self.call(
-                "SetInputSettings",
-                {
-                    "inputName": "BRB_Browser_Source",
-                    "inputSettings": input_settings,
-                    "overlay": True,
-                },
-                allow_error=True,
+        # Clean loop restart when remote network MP4 hits EOF (OBS ignores looping when is_local_file=False)
+        if media_state == "OBS_MEDIA_STATE_ENDED":
+            if BRB_VIDEO_LOOP and (now - self.brb_last_restart_at >= 2.0):
+                if self.brb_mode != "local_cache" and has_cached_brb_file():
+                    await self.configure_brb_source("local_cache")
+                await self.call(
+                    "TriggerMediaInputAction",
+                    {
+                        "inputName": "BRB_Browser_Source",
+                        "mediaAction": "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_RESTART",
+                    },
+                    allow_error=True,
+                )
+                self.brb_last_restart_at = now
+                self.brb_stall_since = None
+            return
+
+        # Stopped / Error / None: wait 5s grace window after last restart before failing over
+        if now - self.brb_last_restart_at < 5.0:
+            return
+
+        if self.brb_stall_since is None:
+            self.brb_stall_since = now
+            return
+
+        if now - self.brb_stall_since >= 4.0:
+            next_mode = "local_cache" if (self.brb_mode != "local_cache" and has_cached_brb_file()) else "remote_stream"
+            print(
+                f"[NOALBS] BRB media state='{media_state}' stalled; restarting in mode='{next_mode}'.",
+                flush=True,
             )
+            await self.configure_brb_source(next_mode)
             await self.call(
                 "TriggerMediaInputAction",
                 {
@@ -2075,6 +2172,8 @@ class OBSClient:
                 },
                 allow_error=True,
             )
+            self.brb_last_restart_at = now
+            self.brb_stall_since = None
 
 
 async def run_controller():
@@ -2086,7 +2185,8 @@ async def run_controller():
                 f"[NOALBS] Connected to Lightweight OBS WebSocket. "
                 f"Main='{OBS_SCENE_LIVE}', BRB='{OBS_SCENE_BRB}', "
                 f"Low=<={LOW_BITRATE:.0f}kbps, Restore>{RESTORE_BITRATE:.0f}kbps, "
-                f"Loop={BRB_VIDEO_LOOP}, Timeout={CLOUD_BRB_TIMEOUT}s",
+                f"Loop={BRB_VIDEO_LOOP}, Timeout={CLOUD_BRB_TIMEOUT}s, "
+                f"RawCacheReady={has_cached_brb_file()}",
                 flush=True,
             )
             await obs.set_scene(OBS_SCENE_LIVE)
@@ -2102,7 +2202,6 @@ async def run_controller():
     live_started_at = None
     brb_started_at = None
     last_brb_log_at = 0.0
-    last_brb_media_check = 0.0
     cooldown_until = 0.0
 
     while True:
@@ -2147,14 +2246,10 @@ async def run_controller():
                         f"Switching to '{OBS_SCENE_BRB}' (loop={BRB_VIDEO_LOOP}, timeout={CLOUD_BRB_TIMEOUT}s).",
                         flush=True,
                     )
-                    await obs.set_scene(OBS_SCENE_BRB)
-                    await obs.ensure_streaming()
-                    await asyncio.sleep(0.3)
-                    await obs.ensure_brb_playing(force_restart=True)
+                    await obs.activate_brb_scene()
                     state = "BRB"
                     brb_started_at = now
                     last_brb_log_at = now
-                    last_brb_media_check = now
                     restore_streak = 0
 
             elif state == "BRB":
@@ -2195,9 +2290,7 @@ async def run_controller():
                         cooldown_until = now + 5.0
                     else:
                         await obs.ensure_streaming()
-                        if BRB_VIDEO_LOOP and (now - last_brb_media_check >= 1.5):
-                            await obs.ensure_brb_playing(force_restart=False)
-                            last_brb_media_check = now
+                        await obs.watchdog_brb_playback()
                         if now - last_brb_log_at >= 30.0:
                             remaining = max(0, int(CLOUD_BRB_TIMEOUT - elapsed))
                             print(
@@ -2241,7 +2334,9 @@ SCENE_BRB = os.environ.get("OBS_SCENE_BRB", "brb")
 APP_NAME = os.environ.get("APP_NAME", "live")
 INTERNAL_PORT = os.environ.get("INTERNAL_RTMP_PORT", "19359")
 BRB_VIDEO_URL = os.environ.get("BRB_VIDEO_URL", "https://filedn.com/lfh40bKbFfD5um9HDFNrJFR/brb.mp4")
+BRB_VIDEO_LOOP = os.environ.get("BRB_VIDEO_LOOP", "true").lower() == "true"
 WS_CONFIG_PATH = "/root/.config/obs-studio/plugin_config/obs-websocket/config.json"
+BRB_CACHE_PATH = "/tmp/brb_media.mp4"
 
 
 def resolve_password():
@@ -2255,13 +2350,20 @@ def resolve_password():
         return ""
 
 
+def has_cached_brb_file():
+    try:
+        return os.path.isfile(BRB_CACHE_PATH) and os.path.getsize(BRB_CACHE_PATH) > 1024
+    except OSError:
+        return False
+
+
 def is_live_publishing():
     try:
         with urllib.request.urlopen("http://127.0.0.1:8090/stat", timeout=1.5) as resp:
             root = ET.fromstring(resp.read())
         for app in root.findall(".//application"):
             name_el = app.find("name")
-            if name_el is not None and name_el.text == APP_NAME:
+            if name_el is not None and (name_el.text or "").strip() == APP_NAME:
                 for stream in app.findall(".//stream"):
                     if (stream.find("publishing") is not None) or any(
                         c.find("publishing") is not None for c in stream.findall("client")
@@ -2274,7 +2376,7 @@ def is_live_publishing():
 
 async def main():
     async with websockets.connect(f"ws://127.0.0.1:{WS_PORT}", ping_interval=None) as ws:
-        hello = json.loads(await asyncio.wait_for(ws.recv(), timeout=5.0))
+        hello = json.loads(await asyncio.wait_for(ws.recv(), timeout=10.0))
         auth = hello.get("d", {}).get("authentication")
         ident = {"rpcVersion": 1, "eventSubscriptions": 0}
         if auth:
@@ -2283,7 +2385,7 @@ async def main():
             a = base64.b64encode(hashlib.sha256((s + auth["challenge"]).encode("utf-8")).digest()).decode("utf-8")
             ident["authentication"] = a
         await ws.send(json.dumps({"op": 1, "d": ident}))
-        res = json.loads(await asyncio.wait_for(ws.recv(), timeout=5.0))
+        res = json.loads(await asyncio.wait_for(ws.recv(), timeout=10.0))
         assert res.get("op") == 2, f"Auth failed: {res}"
         print("OK:OBS_WS_AUTH")
 
@@ -2294,7 +2396,7 @@ async def main():
                 msg["d"]["requestData"] = data
             await ws.send(json.dumps(msg))
             while True:
-                r = json.loads(await asyncio.wait_for(ws.recv(), timeout=5.0))
+                r = json.loads(await asyncio.wait_for(ws.recv(), timeout=10.0))
                 if r.get("op") == 7 and r.get("d", {}).get("requestId") == rid:
                     if not allow_error:
                         assert r["d"]["requestStatus"]["result"], f"{req} failed: {r}"
@@ -2328,47 +2430,32 @@ async def main():
         print(f"OK:OBS_STATS:fps={fps:.1f},cpu={cpu:.1f}%,render_skipped={render_skipped}")
 
         if not is_live_publishing():
+            # Configure BRB source using raw local cache if ready, else direct remote URL
+            mode_used = "local_cache" if has_cached_brb_file() else "remote_stream"
+            m_probe, m_probe_status = await call("GetMediaInputStatus", {"inputName": "BRB_Browser_Source"}, allow_error=True)
+            if m_probe_status.get("result", False):
+                if mode_used == "local_cache":
+                    cfg = {"is_local_file": True, "local_file": BRB_CACHE_PATH, "looping": BRB_VIDEO_LOOP}
+                else:
+                    cfg = {"is_local_file": False, "input": BRB_VIDEO_URL, "buffering_mb": 2, "reconnect_delay_sec": 1}
+                await call("SetInputSettings", {"inputName": "BRB_Browser_Source", "inputSettings": cfg, "overlay": True}, allow_error=True)
+            else:
+                mode_used = "browser_source"
+
             await call("SetCurrentProgramScene", {"sceneName": SCENE_BRB})
             cur1_data, _ = await call("GetCurrentProgramScene")
             cur1 = cur1_data.get("currentProgramSceneName")
             assert cur1 == SCENE_BRB, f"Expected '{SCENE_BRB}', got '{cur1}'"
 
             brb_state = "BROWSER"
-            tried_network_fallback = False
-            for _ in range(10):
-                m_data, m_status = await call("GetMediaInputStatus", {"inputName": "BRB_Browser_Source"}, allow_error=True)
-                if not m_status.get("result", False):
-                    brb_state = "BROWSER"
-                    break
-                brb_state = m_data.get("mediaState", "UNKNOWN")
-                if brb_state == "OBS_MEDIA_STATE_PLAYING":
-                    break
-                if brb_state == "OBS_MEDIA_STATE_ERROR" and not tried_network_fallback:
-                    tried_network_fallback = True
-                    await call(
-                        "SetInputSettings",
-                        {
-                            "inputName": "BRB_Browser_Source",
-                            "inputSettings": {
-                                "is_local_file": False,
-                                "input": BRB_VIDEO_URL,
-                                "buffering_mb": 2,
-                                "reconnect_delay_sec": 1,
-                            },
-                            "overlay": True,
-                        },
-                        allow_error=True,
-                    )
-                    await call(
-                        "TriggerMediaInputAction",
-                        {
-                            "inputName": "BRB_Browser_Source",
-                            "mediaAction": "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_RESTART",
-                        },
-                        allow_error=True,
-                    )
-                await asyncio.sleep(0.5)
-            print(f"OK:BRB_PLAYBACK:{brb_state}")
+            if mode_used != "browser_source":
+                for _ in range(12):
+                    m_data, m_status = await call("GetMediaInputStatus", {"inputName": "BRB_Browser_Source"}, allow_error=True)
+                    brb_state = m_data.get("mediaState", "UNKNOWN")
+                    if brb_state == "OBS_MEDIA_STATE_PLAYING":
+                        break
+                    await asyncio.sleep(0.5)
+            print(f"OK:BRB_PLAYBACK:{brb_state}({mode_used})")
 
             await call("SetCurrentProgramScene", {"sceneName": SCENE_LIVE})
             cur2_data, _ = await call("GetCurrentProgramScene")
@@ -2403,6 +2490,20 @@ else
     export LP_NUM_THREADS=1
 fi
 
+# Non-blocking background raw MP4 cache (ZERO transcoding, ZERO startup/deployment delay)
+# Lets OBS loop the BRB MP4 with 0ms latency while falling back to direct remote streaming if unavailable
+if [ -n "$BRB_VIDEO_URL" ]; then
+    (
+        rm -f /tmp/brb_media.mp4 /tmp/brb_media.mp4.tmp
+        if curl -4 -fsSL --max-time 30 --max-filesize 157286400 "$BRB_VIDEO_URL" -o /tmp/brb_media.mp4.tmp 2>/dev/null \
+           && [ -s /tmp/brb_media.mp4.tmp ]; then
+            mv -f /tmp/brb_media.mp4.tmp /tmp/brb_media.mp4
+        else
+            rm -f /tmp/brb_media.mp4.tmp
+        fi
+    ) &
+fi
+
 python3 /opt/obs-bridge/setup_obs.py
 
 # Ensure no stale OBS sentinel folder triggers Safe Mode prompt
@@ -2420,7 +2521,7 @@ pulseaudio -D --exit-idle-time=-1 --disallow-exit --log-target=file:/tmp/pulse.l
 pactl load-module module-null-sink sink_name=obs_virtual_sink sink_properties=device.description="OBS_Virtual_Audio" >/dev/null 2>&1 || true
 pactl set-default-sink obs_virtual_sink >/dev/null 2>&1 || true
 
-# Launch Lightweight Headless OBS with preconfigured 'main' & 'brb' scenes and explicit WebSocket flags
+# Launch Lightweight Headless OBS at normal priority so nginx & noalbs_controller never starve on 1-core VPS
 OBS_WS_PORT_VAL="${OBS_WS_PORT:-4455}"
 OBS_ARGS=(
     --profile CookieRTMPS
@@ -2434,11 +2535,7 @@ if [ -n "$OBS_WS_PASSWORD" ]; then
     OBS_ARGS+=(--websocket_password="$OBS_WS_PASSWORD")
 fi
 
-if command -v nice >/dev/null 2>&1; then
-    (nice -n -5 obs "${OBS_ARGS[@]}" >/tmp/obs.log 2>&1 || obs "${OBS_ARGS[@]}" >/tmp/obs.log 2>&1) &
-else
-    obs "${OBS_ARGS[@]}" >/tmp/obs.log 2>&1 &
-fi
+obs "${OBS_ARGS[@]}" >/tmp/obs.log 2>&1 &
 
 # Wait up to 20s for OBS WebSocket to bind before starting controller
 for _ in $(seq 1 40); do
@@ -2694,14 +2791,14 @@ s.close()
             record_pass "OBS runtime performance stats ($(get_obs_profile_label) | ${OBS_BRIDGE_RES}@${OBS_BRIDGE_FPS}fps, ${OBS_BRIDGE_PRESET}/${OBS_BRIDGE_X264_PROFILE}, ${OBS_BRIDGE_THREADS}T): ${STATS_LINE}."
         fi
 
-        if echo "$OBS_TEST_OUTPUT" | grep -q "OK:BRB_PLAYBACK:OBS_MEDIA_STATE_PLAYING\|OK:BRB_PLAYBACK:BROWSER"; then
+        if echo "$OBS_TEST_OUTPUT" | grep -qE "OK:BRB_PLAYBACK:(OBS_MEDIA_STATE_PLAYING|BROWSER)"; then
             local BRB_STATE
             BRB_STATE=$(echo "$OBS_TEST_OUTPUT" | grep "OK:BRB_PLAYBACK:" | sed 's/OK:BRB_PLAYBACK://')
             record_pass "BRB scene live playback verified (state=${BRB_STATE})."
         elif echo "$OBS_TEST_OUTPUT" | grep -q "OK:BRB_PLAYBACK:"; then
             local BRB_STATE
             BRB_STATE=$(echo "$OBS_TEST_OUTPUT" | grep "OK:BRB_PLAYBACK:" | sed 's/OK:BRB_PLAYBACK://')
-            record_warn "BRB scene switched, media state after 5s was '${BRB_STATE}' (verify BRB_VIDEO_URL speed)."
+            record_fail "BRB scene switched, but MP4 did not enter PLAYING state within 6s (state=${BRB_STATE})."
         fi
 
         if echo "$OBS_TEST_OUTPUT" | grep -q "OK:SCENE_SWITCH_ROUNDTRIP"; then
@@ -3110,7 +3207,7 @@ if p.exists():
         echo -e "${CYAN}Disconnection Protection: ACTIVE${NC}"
         echo -e "  - Profile:    $(get_obs_profile_label) (${OBS_BRIDGE_RES}@${OBS_BRIDGE_FPS}fps, ${OBS_BRIDGE_PRESET}/${OBS_BRIDGE_X264_PROFILE}, ${OBS_BRIDGE_THREADS}T, ${OBS_BRIDGE_BITRATE}kbps)"
         echo -e "  - Main Scene: '${OBS_SCENE_LIVE}' (RTMP/RTMPS Ingest)"
-        echo -e "  - BRB Scene:  '${OBS_SCENE_BRB}' (Direct MP4 URL: ${BRB_VIDEO_URL}, Loop=${BRB_VIDEO_LOOP})"
+        echo -e "  - BRB Scene:  '${OBS_SCENE_BRB}' (MP4 URL: ${BRB_VIDEO_URL}, Loop=${BRB_VIDEO_LOOP})"
         echo -e "  - Trigger:    <= ${LOW_BITRATE} kbps -> '${OBS_SCENE_BRB}' | > ${RESTORE_BITRATE} kbps -> '${OBS_SCENE_LIVE}'"
         echo -e "  - Timeout:    Takes OBS offline & resets to '${OBS_SCENE_LIVE}' after ${CLOUD_BRB_TIMEOUT}s in BRB"
     else
@@ -3156,7 +3253,7 @@ view_logs() {
                 fflush()
                 next
             }
-            /NOALBS|Cloud BRB|Connection restored|Ingest traffic/ {
+            /NOALBS|Cloud BRB|Connection restored|Ingest traffic|BRB scene active/ {
                 print "\033[0;36m" $0 "\033[0m"
                 fflush()
                 next
